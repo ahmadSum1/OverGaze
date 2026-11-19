@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#11131a">
+  <meta name="description" content="A private, browser-based tool to turn eye-tracking fixations into saliency maps over 360° and 2D video.">
+  <title>OverGaze — see where people look</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Ccircle cx=%228%22 cy=%228%22 r=%226%22 fill=%22%23c8f56a%22/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div id="file-warning" class="file-warning" hidden>
+    <strong>This page was opened as a file, so the browser blocks its scripts and nothing can work.</strong>
+    Serve the folder instead: run <code>python3 -m http.server 8000</code> in the OverGaze folder and open <code>http://localhost:8000</code>, or use the GitHub Pages address.
+  </div>
+  <script>if (location.protocol === 'file:') document.getElementById('file-warning').hidden = false;</script>
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="OverGaze home"><span class="brand-mark"><span></span><span></span><span></span><span></span></span><span>overgaze<span class="brand-dot">.</span></span></a>
+    <div class="topbar-right">
+      <span class="privacy"><span class="privacy-dot"></span> ALL PROCESSING IS LOCAL</span>
+      <a class="github-link" href="https://github.com/ahmadSum1/OverGaze" target="_blank" rel="noopener noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+      <details id="help-menu" class="help-menu">
+        <summary aria-label="Help and sample" title="Help and sample">i</summary>
+        <div class="help-panel">
+          <strong>Getting started</strong>
+          <p>Load a video and one or more gaze files (CSV, TSV, JSON or ARFF), or try the synthetic 360° sample: a red ball moving across a panning scene, watched by 8 simulated observers.</p>
+          <button id="load-sample" class="button button-outline" type="button">Load 360° sample</button> <button id="load-sample-2d" class="button button-outline" type="button">Load 2D sample</button>
+          <strong>Keyboard</strong>
+          <p><span class="keyboard">Space</span> play / pause · <span class="keyboard">←</span><span class="keyboard">→</span> one frame · <span class="keyboard">Shift</span> + arrows one second · <span class="keyboard">M</span> motion compensation · <span class="keyboard">P</span> gaze points</p>
+        </div>
+      </details>
+    </div>
+  </header>
+
+  <main class="app">
+    <aside id="sidebar" class="sidebar panel-scroll">
+      <div class="sidebar-heading"><div class="eyebrow">YOUR SOURCES</div><h2>Video &amp; gaze</h2></div>
+
+      <section class="side-section">
+        <div class="section-title"><span class="section-icon">▶</span> Video <span class="section-number">A</span></div>
+        <div class="button-row"><button id="choose-video" class="button button-outline" type="button">▱ Load video file</button></div>
+        <label class="input-label" for="video-url">OR A DIRECT LINK (.mp4 / .webm)</label>
+        <div class="url-row"><input id="video-url" type="url" placeholder="https://…/clip.mp4"><button id="load-video-url" class="button button-outline" type="button">Open</button></div>
+        <dl class="details compact"><div><dt>File</dt><dd id="video-name">—</dd></div><div><dt>Size</dt><dd id="video-size">—</dd></div><div><dt>Duration</dt><dd id="video-duration">—</dd></div><div><dt>Pixels</dt><dd id="video-access">—</dd></div></dl>
+      </section>
+
+      <section class="side-section">
+        <div class="section-title"><span class="section-icon">◎</span> Gaze data <span class="section-number">B</span></div>
+        <div class="button-row"><button id="choose-gaze" class="button button-outline" type="button">＋ Load files</button><button id="choose-gaze-folder" class="button button-outline" type="button">▱ Load folder</button></div>
+        <label class="input-label" for="gaze-url">OR A DIRECT LINK</label>
+        <div class="url-row"><input id="gaze-url" type="url" placeholder="https://…/fixations.csv"><button id="load-gaze-url" class="button button-outline" type="button">Open</button></div>
+        <label class="input-label" for="gaze-filter">ONLY FILES WHOSE PATH CONTAINS (OPTIONAL)</label>
+        <input id="gaze-filter" type="text" placeholder="default: files that belong to the loaded video" autocomplete="off">
+        <p id="gaze-summary" class="hint">No gaze loaded. One file per observer, or one file with an observer column.</p>
+      </section>
+
+      <section id="mapping-section" class="side-section" hidden>
+        <div class="section-title"><span class="section-icon">⇄</span> Column mapping <span class="section-number">C</span></div>
+        <p class="hint">Guessed from the headers and value ranges. Check the overlay: wrong units or axes are obvious on screen.</p>
+        <div class="grid2">
+          <label>Time<select id="map-time" data-map="time"></select></label>
+          <label>Unit<select id="map-timeUnit" data-map="timeUnit"><option value="s">seconds</option><option value="ms">milliseconds</option><option value="us">microseconds</option><option value="frame">frame index (from 0)</option><option value="frame1">frame number (from 1)</option></select></label>
+          <label>Duration<select id="map-duration" data-map="duration"></select></label>
+          <label>Unit<select id="map-durationUnit" data-map="durationUnit"><option value="s">seconds</option><option value="ms">milliseconds</option><option value="us">microseconds</option><option value="frame">frames</option></select></label>
+          <label>End time<select id="map-end" data-map="end"></select></label>
+          <label>Time offset (s)<input id="map-timeOffset" data-map="timeOffset" type="number" step="0.01" value="0"></label>
+          <label>Horizontal<select id="map-x" data-map="x"></select></label>
+          <label>Vertical<select id="map-y" data-map="y"></select></label>
+          <label>Coordinates<select id="map-coord" data-map="coord"><option value="normalized">normalised 0–1</option><option value="degrees">degrees</option><option value="radians">radians</option><option value="pixels">pixels</option><option value="vector">3D direction (x right, y up, z fwd)</option></select></label>
+          <label id="map-z-wrap">Z<select id="map-z" data-map="z"></select></label>
+          <label>Value at left edge<input data-map="xLeft" type="number" step="any"></label>
+          <label>Value at right edge<input data-map="xRight" type="number" step="any"></label>
+          <label>Value at top edge<input data-map="yTop" type="number" step="any"></label>
+          <label>Value at bottom edge<input data-map="yBottom" type="number" step="any"></label>
+          <label>Observer from<select data-map="observerFrom"><option value="file">file name</option><option value="folder">folder name</option><option value="column">column</option><option value="none">none (all one)</option></select></label>
+          <label>Observer column<select id="map-observer" data-map="observer"></select></label>
+          <label>Condition from<select data-map="conditionFrom"><option value="none">none</option><option value="column">column</option><option value="folder">folder name</option><option value="folder2">folder above that</option><option value="file">file name</option></select></label>
+          <label>Condition column<select id="map-condition" data-map="condition"></select></label>
+          <label>Weight column<select id="map-weight" data-map="weight"></select></label>
+        </div>
+        <div id="preview-table" class="preview-table"></div>
+        <p id="mapping-error" class="dialog-error" role="alert" hidden></p>
+      </section>
+
+      <section id="groups-section" class="side-section" hidden>
+        <div class="section-title"><span class="section-icon">☷</span> Observers &amp; conditions <span class="section-number">D</span></div>
+        <div id="condition-list" class="chip-list"></div>
+        <div class="list-head"><span id="observer-count">0 observers</span><span><button id="obs-all" class="link-button" type="button">all</button> · <button id="obs-none" class="link-button" type="button">none</button></span></div>
+        <div id="observer-list" class="observer-list"></div>
+      </section>
+      <div class="sidebar-footer"><div class="shortcut-icon">⌘</div><div><strong>Made for visual checking</strong><span>Your files never leave your device.</span></div></div>
+    </aside>
+
+    <section class="workspace">
+      <div class="workspace-header"><div><div class="breadcrumb">WORKSPACE <span>/</span> <strong>GAZE OVERLAY</strong></div><h1>See where people look<span class="accent">.</span></h1><p>Turn fixations into saliency, tune it live, export the maps.</p></div><div class="workspace-header-right"><span class="status-dot"></span> <span id="status">Ready</span></div></div>
+
+      <div class="viewer-card">
+        <div class="viewer-toolbar"><div class="viewer-title"><span class="viewer-icon">◉</span><div><strong id="viewer-name">Canvas</strong><span id="viewer-subtitle">Load a video and gaze data</span></div></div><div class="toolbar-right"><span id="readout-badge" class="dimension-badge" hidden></span><span class="live-badge"><span></span> LIVE OVERLAY</span></div></div>
+        <div id="drop-zone" class="canvas-area">
+          <div id="empty-state" class="empty-state">
+            <div class="empty-art" aria-hidden="true"><div class="art-layer art-layer-back"></div><div class="art-layer art-layer-middle"></div><div class="art-layer art-layer-front"><span>◉</span></div><i class="art-spark art-spark-one">✳</i><i class="art-spark art-spark-two">✦</i></div>
+            <div class="empty-kicker">WHERE DID THEY LOOK?</div>
+            <h2>Bring your video and gaze.</h2>
+            <p>Drop a video and fixation files here, or choose<br class="desktop-break"> them from the panel on the left.</p>
+            <div class="empty-actions"><button id="empty-video" class="button button-primary" type="button">▶ Load a video <span aria-hidden="true">↗</span></button><button id="empty-sample" class="button button-ghost" type="button">Try the sample</button></div>
+            <div class="supported">VIDEO <span>.MP4</span> <span>.WEBM</span> · GAZE <span>.CSV</span> <span>.TSV</span> <span>.JSON</span> <span>.ARFF</span></div>
+          </div>
+          <div id="stage-wrap" class="stage-wrap" hidden>
+            <div id="stage" class="stage">
+              <video id="video" playsinline muted preload="auto"></video>
+              <canvas id="heat-canvas"></canvas>
+              <canvas id="marks-canvas"></canvas>
+            </div>
+          </div>
+          <div id="error-message" class="error-message" role="alert" hidden></div>
+        </div>
+        <div class="transport">
+          <button id="play" class="nav-button play-button" type="button" aria-label="Play" disabled>▶</button>
+          <button id="prev-frame" class="nav-button" type="button" aria-label="Previous frame" title="Previous frame (←)" disabled>‹</button>
+          <button id="next-frame" class="nav-button" type="button" aria-label="Next frame" title="Next frame (→)" disabled>›</button>
+          <div class="scrub">
+            <canvas id="density-canvas" class="density" title="Gaze points over time (click to seek)"></canvas>
+            <input id="scrubber" type="range" min="0" max="1" step="0.001" value="0" aria-label="Video position" disabled>
+          </div>
+          <span id="time-label" class="time-label">0.000 s · frame 0</span>
+          <select id="speed" aria-label="Playback speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+        </div>
+      </div>
+      <div id="notice" class="notice" role="status" hidden></div>
+
+      <div class="readouts">
+        <div><span>POINTS IN WINDOW</span><strong id="ro-points">—</strong></div>
+        <div><span>OBSERVERS</span><strong id="ro-observers">—</strong></div>
+        <div><span>COVERAGE ≥ 0.1 MAX</span><strong id="ro-coverage">—</strong><small>pixels / sphere area</small></div>
+        <div><span>MAP</span><strong id="ro-map">—</strong><small id="ro-ms">—</small></div>
+      </div>
+    </section>
+
+    <aside class="inspector panel-scroll">
+      <div class="inspector-heading"><div class="eyebrow">MAKE IT YOURS</div><h2>Saliency settings</h2><p>Every change redraws the current frame.</p></div>
+
+      <div class="settings-section"><div class="section-title"><span class="section-icon">◐</span> Gaussian <span class="section-number">01</span></div>
+        <div class="button-row"><button id="preset-dataset" class="button button-outline" type="button" title="σ 3°, ±1 s Gaussian weights, speed filter 75°/s, motion compensation on when analysed">Match the dataset maps</button></div>
+        <label class="input-label" for="projection">PROJECTION</label>
+        <div class="select-wrap"><select id="projection"><option value="erp">360° equirectangular (sphere Gaussian)</option><option value="planar">2D video (image-plane Gaussian)</option></select></div>
+        <div class="setting-row"><label for="sigma">σ (degrees)</label><input id="sigma-num" class="num" type="number" min="0.25" max="30" step="0.25" value="2"></div>
+        <input id="sigma" type="range" min="0.25" max="15" step="0.25" value="2">
+        <div id="fov-row" hidden><div class="setting-row"><label for="fov">Horizontal field of view (°)</label><input id="fov" class="num" type="number" min="10" max="180" step="1" value="90"></div></div>
+      </div>
+
+      <div class="settings-section"><div class="section-title"><span class="section-icon">◷</span> Temporal pooling <span class="section-number">02</span></div>
+        <div class="setting-row"><label for="window">Window ± (seconds)</label><input id="window-num" class="num" type="number" min="0" max="10" step="0.05" value="0"></div>
+        <input id="window" type="range" min="0" max="3" step="0.05" value="0">
+        <div class="range-labels"><span>THIS FRAME ONLY</span><span>±3 S</span></div>
+        <label class="input-label" for="kernel">WEIGHT OVER TIME</label>
+        <div class="select-wrap"><select id="kernel"><option value="box">Flat (box)</option><option value="triangle">Triangle (fades to the window edge)</option><option value="gaussian">Gaussian (σ = window / 2)</option></select></div>
+        <label class="view-switch"><span>Past only (causal, like a live mask)</span><input id="causal" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="view-switch"><span>Weight fixations by duration</span><input id="duration-weight" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
+        <div class="setting-row"><label for="fps">Video frame rate</label><input id="fps" class="num" type="number" min="1" max="240" step="0.001" value="30"></div>
+        <p id="fps-note" class="hint">Default 30. Measured from decoded frames once the video plays.</p>
+      </div>
+
+      <div class="settings-section"><div class="section-title"><span class="section-icon">↝</span> Motion compensation <span class="section-number">03</span></div>
+        <p class="hint">Moves each pooled gaze point along the optical flow to where that content is in the current frame, so a moving camera or object does not smear the map.</p>
+        <div class="grid2">
+          <label>Flow samples / s<select id="flow-rate"><option value="5">5</option><option value="10" selected>10</option><option value="15">15</option><option value="30">30</option></select></label>
+          <label>Flow resolution<select id="flow-width"><option value="128">128 × 64</option><option value="256" selected>256 × 128</option><option value="512">512 × 256</option></select></label>
+          <label>Frame grabbing<select id="flow-method"><option value="play">play (fast)</option><option value="seek">seek (exact)</option></select></label>
+          <label>Range<select id="flow-range"><option value="all">whole video</option><option value="export">export range</option></select></label>
+        </div>
+        <div class="button-row"><button id="analyse" class="button button-outline" type="button" disabled>Analyse motion</button><button id="clear-flow" class="button button-outline" type="button" disabled>Clear</button></div>
+        <div id="flow-progress" class="progress" hidden><div></div></div>
+        <p id="flow-status" class="hint">Not analysed.</p>
+        <label class="view-switch"><span>Use motion compensation</span><input id="motion" type="checkbox" role="switch" disabled><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="view-switch"><span>Show flow vectors</span><input id="show-flow" type="checkbox" role="switch" disabled><span class="switch-track" aria-hidden="true"></span></label>
+      </div>
+
+      <div class="settings-section"><div class="section-title"><span class="section-icon">⟲</span> Gaze processing <span class="section-number">04</span></div>
+        <div class="setting-row"><label for="vel">Drop samples faster than (°/s)</label><input id="vel" class="num" type="number" min="0" max="2000" step="5" value="0"></div>
+        <p class="hint">0 = off. For raw gaze samples (not fixations), e.g. 75°/s.</p>
+        <div class="setting-row"><label for="lon-offset">Rotate longitude (°)</label><input id="lon-offset-num" class="num" type="number" min="-180" max="180" step="1" value="0"></div>
+        <input id="lon-offset" type="range" min="-180" max="180" step="1" value="0">
+        <label class="view-switch"><span>Flip left–right</span><input id="flip-x" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="view-switch"><span>Flip up–down</span><input id="flip-y" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
+      </div>
+
+      <div class="settings-section"><div class="section-title"><span class="section-icon">◉</span> Display <span class="section-number">05</span></div>
+        <label class="input-label" for="mode">OVERLAY</label>
+        <div class="select-wrap"><select id="mode"><option value="heat">Heatmap (fades in with saliency)</option><option value="solid">Heatmap (flat opacity)</option><option value="spotlight">Spotlight (darken what nobody looks at)</option><option value="gray">Map only (grey, as exported)</option><option value="off">Off (video only)</option></select></div>
+        <label class="input-label" for="colormap">COLORMAP</label>
+        <div class="select-wrap"><select id="colormap"></select></div>
+        <div id="color-ramp" class="color-ramp"></div>
+        <div class="setting-row"><label for="opacity">Opacity</label><output id="opacity-value">65%</output></div>
+        <input id="opacity" type="range" min="0" max="100" value="65">
+        <div class="setting-row"><label for="gamma">Gamma</label><output id="gamma-value">1.00</output></div>
+        <input id="gamma" type="range" min="0.2" max="3" step="0.05" value="1">
+        <div class="setting-row"><label for="map-width">Live map width</label><select id="map-width" class="num-select"><option value="256">256</option><option value="512" selected>512</option><option value="1024">1024</option></select></div>
+        <label class="view-switch"><span>Show gaze points</span><input id="show-points" type="checkbox" role="switch" checked><span class="switch-track" aria-hidden="true"></span></label>
+      </div>
+
+      <div class="settings-section"><div class="section-title"><span class="section-icon">⇩</span> Export <span class="section-number">06</span></div>
+        <div class="grid2">
+          <label>From (s)<input id="ex-start" type="number" min="0" step="0.01" value="0"></label>
+          <label>To (s)<input id="ex-end" type="number" min="0" step="0.01" value="0"></label>
+        </div>
+        <div class="button-row"><button id="ex-start-here" class="button button-outline small" type="button">From = playhead</button><button id="ex-end-here" class="button button-outline small" type="button">To = playhead</button></div>
+        <div class="grid2">
+          <label>Every n-th frame<input id="ex-step" type="number" min="1" step="1" value="1"></label>
+          <label>Map width<select id="ex-width"><option value="128">128 (128 × 64)</option><option value="256">256</option><option value="512">512</option><option value="1024">1024</option><option value="2048" selected>2048 (2048 × 1024)</option><option value="3840">3840</option><option value="video">video width</option></select></label>
+          <label>Normalise<select id="ex-norm"><option value="max">÷ frame max (0–1)</option><option value="sum">÷ frame sum (probability)</option><option value="none">none (raw sum)</option></select></label>
+          <label>Format<select id="ex-format"><option value="png8">ZIP of PNG, grey 8-bit</option><option value="png16">ZIP of PNG, grey 16-bit</option><option value="npyf4">ZIP with NPY float32 (T, H, W)</option><option value="npyu1">ZIP with NPY uint8 (T, H, W)</option></select></label>
+        </div>
+        <p id="ex-summary" class="hint">—</p>
+        <button id="export-maps" class="button button-primary wide" type="button" disabled>Export saliency maps</button>
+        <div id="ex-progress" class="progress" hidden><div></div></div>
+        <div class="button-row"><button id="export-cancel" class="button button-outline small" type="button" hidden>Cancel export</button></div>
+        <div class="button-row wrap">
+          <button id="export-frame" class="button button-outline small" type="button" disabled>This map (PNG)</button>
+          <button id="export-snapshot" class="button button-outline small" type="button" disabled>Overlay snapshot (PNG)</button>
+          <button id="export-video" class="button button-outline small" type="button" disabled>Record overlay video</button>
+          <button id="export-gaze" class="button button-outline small" type="button" disabled>Processed gaze (CSV)</button>
+          <button id="copy-settings" class="button button-outline small" type="button">Copy settings (JSON)</button>
+        </div>
+      </div>
+      <div class="inspector-tip"><span>✳</span><div><strong>Coverage</strong><p>Share of the frame at or above 0.1 of the frame maximum, per pixel and per sphere area. Use it to compare map density between settings or datasets.</p></div></div>
+    </aside>
+  </main>
+  <input id="video-input" type="file" accept="video/*,.mkv,.mov" hidden>
+  <input id="gaze-input" type="file" accept=".csv,.tsv,.txt,.json,.arff,.dat" multiple hidden>
+  <input id="gaze-folder-input" type="file" webkitdirectory multiple hidden>
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,216 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { inflateSync } from 'node:zlib';
+import { buildGaze, detectMapping, parseTable, toLonLat, vectorToLonLat, velocityFilter, packRecords } from '../src/gaze.js';
+import { collectPoints, coverage, makeGrid, renderMap, splatSphere, makePointBuffer, DEFAULTS, frameCentre } from '../src/saliency.js';
+import { FlowStore, opticalFlow } from '../src/flow.js';
+import { crc32, encodeGrayPng, npyHeader, ZipWriter } from '../src/export.js';
+
+const DEG = Math.PI / 180;
+const close = (a, b, eps, msg) => assert.ok(Math.abs(a - b) <= eps, `${msg ?? ''} ${a} vs ${b}`);
+
+test('parses CSV with header and detects fixation columns', () => {
+  const t = parseTable('user,start_time,duration,longitude,latitude\n1,0.10,0.25,0.5,0.5\n1,0.40,0.30,0.75,0.25\n2,0.05,0.20,0.1,0.9\n', 'a.csv');
+  assert.deepEqual(t.columns, ['user', 'start_time', 'duration', 'longitude', 'latitude']);
+  const m = detectMapping(t, { duration: 30 });
+  assert.equal(m.time, 'start_time'); assert.equal(m.duration, 'duration');
+  assert.equal(m.x, 'longitude'); assert.equal(m.y, 'latitude');
+  assert.equal(m.coord, 'normalized'); assert.equal(m.observer, 'user'); assert.equal(m.timeUnit, 's');
+  const g = buildGaze([{ table: t, name: 'a.csv' }], m);
+  assert.equal(g.n, 3); assert.equal(g.observers.length, 2);
+  assert.equal(g.t0[0], 0.05);
+  close(g.t1[1], 0.35, 1e-9);
+  close(g.lon[1], 0, 1e-9); close(g.lat[1], 0, 1e-9);
+});
+
+test('parses headerless TSV and ARFF', () => {
+  const t = parseTable('0\t1920\t960\n33\t1900\t950\n66\t1910\t940\n', 'g.tsv');
+  assert.equal(t.columns.length, 3);
+  const m = detectMapping(t, { duration: 1 });
+  assert.equal(m.time, 'col0'); assert.equal(m.coord, 'pixels'); assert.equal(m.timeUnit, 'ms');
+  const a = parseTable('@RELATION gaze_360\n@ATTRIBUTE time NUMERIC\n@ATTRIBUTE x NUMERIC\n@ATTRIBUTE y NUMERIC\n@DATA\n0,10,20\n1000,11,21\n', 'x.arff');
+  assert.deepEqual(a.columns, ['time', 'x', 'y']); assert.equal(a.rows.length, 2);
+});
+
+test('coordinate conversions', () => {
+  const deg = { xLeft: -180, xRight: 180, yTop: 90, yBottom: -90 };
+  const [lon, lat] = toLonLat(90, 45, deg);
+  close(lon, 90 * DEG, 1e-9); close(lat, 45 * DEG, 1e-9);
+  const [lon2] = toLonLat(270, 0, { xLeft: 0, xRight: 360, yTop: 90, yBottom: -90 });
+  close(lon2, 90 * DEG, 1e-9);
+  const [vl, va] = vectorToLonLat(1, 0, 0);
+  close(vl, 90 * DEG, 1e-9); close(va, 0, 1e-9);
+});
+
+test('sphere Gaussian is centred, wraps across the seam and is wider in pixels near the poles', () => {
+  const W = 256, H = 128, grid = makeGrid(W, H);
+  const pts = makePointBuffer();
+  pts.n = 1; pts.lon[0] = Math.PI - 0.001; pts.lat[0] = 0; pts.w[0] = 1;
+  const map = new Float32Array(W * H);
+  splatSphere(map, grid, pts, 4 * DEG);
+  const row = 64 * W;
+  assert.ok(map[row + W - 1] > 0.9 && map[row] > 0.9, 'both sides of the seam');
+  const equatorWidth = map.slice(row, row + W).filter(v => v > 0.5).length;
+  map.fill(0); pts.lat[0] = 75 * DEG; pts.lon[0] = 0;
+  splatSphere(map, grid, pts, 4 * DEG);
+  const y = Math.round((0.5 - 75 / 180) * H - 0.5);
+  const poleWidth = map.slice(y * W, y * W + W).filter(v => v > 0.5).length;
+  assert.ok(poleWidth > 2.5 * equatorWidth, `${poleWidth} vs ${equatorWidth}`);
+});
+
+test('temporal pooling window, causal mode and coverage', () => {
+  const recs = [0.05, 0.5, 1.0, 1.5].map((t, i) => [t, t, i * 0.5 - 1, 0, 0, 0, 1]);
+  const g = packRecords(recs, ['o'], ['c']);
+  const s = { ...DEFAULTS };
+  assert.equal(collectPoints(g, frameCentre(0, 10), s, { fps: 10 }).n, 1);
+  assert.equal(collectPoints(g, 1.0, { ...s, windowSec: 0.5 }, { fps: 10 }).n, 3);
+  assert.equal(collectPoints(g, 1.0, { ...s, windowSec: 0.5, causal: true }, { fps: 10 }).n, 2);
+  const tri = collectPoints(g, 1.0, { ...s, windowSec: 0.5, kernel: 'triangle' }, { fps: 10 });
+  assert.ok(tri.w[0] < 1 && tri.w[1] === 1);
+  const r = renderMap(g, 1.0, { ...s, windowSec: 0.5, sigmaDeg: 3 }, 128, 64, { fps: 10 });
+  const c = coverage(r.map, 128, 64);
+  assert.ok(c.pixels > 0 && c.pixels < 0.2 && c.sphere > c.pixels * 0.9);
+  close(Math.max(...r.map), 1, 1e-6);
+});
+
+test('velocity filter drops fast samples', () => {
+  const recs = [[0, 0, 0, 0, 0, 0, 1], [0.1, 0.1, 2 * DEG, 0, 0, 0, 1], [0.2, 0.2, 60 * DEG, 0, 0, 0, 1]];
+  const g = velocityFilter(packRecords(recs, ['o'], ['c']), 75);
+  assert.equal(g.n, 2); assert.equal(g.filtered, 1);
+});
+
+test('optical flow recovers a horizontal shift with wrap-around', () => {
+  const W = 128, H = 64, a = new Float32Array(W * H), b = new Float32Array(W * H);
+  const f = (x, y) => 0.5 + 0.25 * Math.sin(x * 2 * Math.PI / W * 5) * Math.cos(y * 0.3) + 0.2 * Math.sin((x * 2 * Math.PI / W) * 3 + y * 0.17);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { a[y * W + x] = f(x, y); b[y * W + x] = f(x - 3, y); }
+  const { u, v } = opticalFlow(a, b, W, H, { wrap: true });
+  let su = 0, sv = 0;
+  for (let y = 10; y < H - 10; y++) for (let x = 0; x < W; x++) { su += u[y * W + x]; sv += v[y * W + x]; }
+  const n = (H - 20) * W;
+  close(su / n, 3, 0.3, 'u'); close(sv / n, 0, 0.3, 'v');
+});
+
+test('flow store moves points with the measured velocity', () => {
+  const s = new FlowStore(64, 32);
+  const u = new Float32Array(64 * 32).fill(2), v = new Float32Array(64 * 32).fill(0);
+  for (let k = 0; k < 20; k++) s.add(k * 0.1, (k + 1) * 0.1, u, v); // 2 px per 0.1 s = 20 px/s
+  const [lon] = s.propagate(0, 0, 0.5, 1.0);
+  close(lon, 10 / 64 * 2 * Math.PI, 1e-3);
+  const [back] = s.propagate(lon, 0, 1.0, 0.5);
+  close(back, 0, 1e-3);
+  close(s.coverage(0, 2), 1, 1e-9);
+});
+
+test('motion-compensated pooling collapses a moving track onto the current position', () => {
+  const W = 64, H = 32, flow = new FlowStore(W, H);
+  const u = new Float32Array(W * H).fill(1), v = new Float32Array(W * H);
+  for (let k = 0; k < 40; k++) flow.add(k * 0.1, (k + 1) * 0.1, u, v);  // 10 px/s
+  const pxToLon = x => ((x + 0.5) / W - 0.5) * 2 * Math.PI;
+  const recs = [];
+  for (let k = 0; k <= 20; k++) recs.push([k * 0.1, k * 0.1, pxToLon(10 + k), 0, 0, 0, 1]); // object at 10 px/s
+  const g = packRecords(recs, ['o'], ['c']);
+  const s = { ...DEFAULTS, windowSec: 1, motionComp: true };
+  const p = collectPoints(g, 1.0, s, { fps: 10, flow });
+  const target = pxToLon(20);
+  for (let i = 0; i < p.n; i++) close(p.lon[i], target, 0.02);
+  const plain = collectPoints(g, 1.0, { ...s, motionComp: false }, { fps: 10, flow });
+  const spread = Math.max(...plain.lon.slice(0, plain.n)) - Math.min(...plain.lon.slice(0, plain.n));
+  assert.ok(spread > 1.5);
+});
+
+test('zip, npy and png writers produce valid files', async () => {
+  assert.equal(crc32(new TextEncoder().encode('123456789')), 0xCBF43926);
+  const parts = [];
+  const zip = new ZipWriter(async b => parts.push(b));
+  await zip.add('a.txt', 'hello'); await zip.finish();
+  const bytes = Buffer.concat(parts);
+  assert.equal(bytes.readUInt32LE(0), 0x04034b50);
+  assert.equal(bytes.readUInt32LE(bytes.length - 22), 0x06054b50);
+  const h = npyHeader('<f4', [3, 64, 128]);
+  assert.equal(h.length % 64, 0);
+  assert.match(new TextDecoder().decode(h.slice(10)), /'shape': \(3, 64, 128\)/);
+  const vals = new Float32Array(16 * 8).map((_, i) => (i % 16) / 15);
+  const png = Buffer.from(await encodeGrayPng(vals, 16, 8));
+  assert.equal(png.readUInt32BE(16), 16); assert.equal(png[24], 8); assert.equal(png[25], 0);
+  const idatLen = png.readUInt32BE(33);
+  const raw = inflateSync(png.subarray(41, 41 + idatLen));
+  assert.equal(raw.length, 8 * 17);
+  assert.equal(raw[1], 0); assert.equal(raw[16], 255); // first row, Up filter against zeros
+});
+
+test('streamed ZIP entries carry a data descriptor and ZIP64 records', async () => {
+  const parts = [];
+  const zip = new ZipWriter(async b => parts.push(b));
+  const s = await zip.stream('maps.npy');
+  await s.write(npyHeader('|u1', [2, 2, 2])); await s.write(new Uint8Array(8).fill(7)); await s.end();
+  await zip.add('settings.json', '{}'); await zip.finish();
+  const bytes = Buffer.concat(parts);
+  assert.ok(bytes.indexOf(Buffer.from([0x50, 0x4b, 0x07, 0x08])) > 0, 'data descriptor');
+  assert.ok(bytes.indexOf(Buffer.from([0x50, 0x4b, 0x06, 0x06])) > 0, 'ZIP64 end record');
+  assert.equal(bytes.readUInt32LE(bytes.length - 22), 0x06054b50);
+});
+
+// ---------- real dataset formats ----------
+import { pathMatchesVideo } from '../src/gaze.js';
+import { fpsFromDeltas } from '../src/timing.js';
+
+const VRET = 'frame,1,forward,0.4979051,0.51714,eye,0.25,0.25\nframe,2,forward,0.4974872,0.5171432,eye,0.26,0.26\nframe,3,forward,0.49,0.5,eye,0.27,0.27\n';
+
+test('VR-EyeTracking rows are recognised, y counts from the bottom and frame numbers give frame centres', () => {
+  const t = parseTable(VRET, '001._2017-10-03-18-55_ori_0.txt');
+  assert.equal(t.preset, 'vret'); assert.equal(t.rows.length, 3);
+  const m = detectMapping(t, {});
+  assert.equal(m.timeUnit, 'frame1'); assert.equal(m.x, 'gaze_x'); assert.equal(m.y, 'gaze_y');
+  const g = buildGaze([{ table: t, name: 'a.txt', folder: 'p003' }], m, { fps: 25 });
+  close(g.t0[0], 0.5 / 25, 1e-9, 'frame 1 is centred at half a frame'); close(g.t0[2], 2.5 / 25, 1e-9);
+  close(g.lon[0], (0.25 - 0.5) * 2 * Math.PI, 1e-9, 'longitude from the left edge');
+  close(g.lat[0], -Math.PI / 4, 1e-9, 'y = 0.25 from the bottom is below the equator');
+  assert.deepEqual(g.observers, ['p003'], 'observer is the folder name');
+});
+
+test('YT360 per-user fixation files map eye_rect_x / eye_rect_y (y from the top) and use the condition folder', () => {
+  const csv = 'eye_rect_x,eye_rect_y,head_rect_x,head_rect_y,eye_x,eye_y,eye_z,head_x,head_y,head_z,start_time,end_time,duration\n0.25,0.25,0.5,0.5,0,0,1,0,0,1,0.5,0.8,0.3\n';
+  const t = parseTable(csv, '0b4b.txt'), m = detectMapping(t, { duration: 30 });
+  assert.equal(m.preset, 'yt360'); assert.equal(m.conditionFrom, 'folder2'); assert.equal(m.time, 'start_time'); assert.equal(m.duration, 'duration');
+  const g = buildGaze([{ table: t, name: '0b4b.txt', folder: 'clip-28', folder2: 'videos-audios' }, { table: t, name: '0b4b.txt', folder: 'clip-28', folder2: 'videos_mono-audios' }], m, { fps: 30 });
+  assert.equal(g.n, 2); assert.equal(g.conditions.length, 2); assert.equal(g.observers.length, 2, 'same observer id in two conditions stays two people');
+  close(g.lat[0], Math.PI / 4, 1e-9, 'y = 0.25 from the top is above the equator');
+  close(g.t1[0] - g.t0[0], 0.3, 1e-9);
+});
+
+test('a gaze sample pools with Gaussian weights over +-1 s exactly like the dataset maps (whole frames, sigma = fps / 2 frames)', () => {
+  const fps = 25, rec = [];
+  for (let f = -30; f <= 30; f++) rec.push([(f + 0.5) / fps, (f + 0.5) / fps, 0, 0, 0, 0, 1]);
+  const g = packRecords(rec, ['a'], ['c']);
+  const s = { ...DEFAULTS, windowSec: 1, kernel: 'gaussian' };
+  const pts = collectPoints(g, 0.5 / fps, s, { fps });
+  assert.equal(pts.n, 51, 'frames -25 … +25');
+  const byFrame = new Map();
+  for (let i = 0; i < pts.n; i++) byFrame.set(Math.round(pts.w[i] * 1e6), 1);
+  const want = d => Math.exp(-d * d / (2 * 12.5 * 12.5));
+  const ws = Array.from({ length: pts.n }, (_, i) => pts.w[i]).sort((a, b) => a - b);
+  close(ws[0], want(25), 1e-9, 'weight at ±1 s'); close(ws[ws.length - 1], 1, 1e-12);
+});
+
+test('a fixation counts once for every frame it covers, a short window gives its frames inside the window', () => {
+  const fps = 25;
+  const g = packRecords([[0.0, 0.2, 0, 0, 0, 0, 1]], ['a'], ['c']);   // frames 0…4 (centres 0.02 … 0.18)
+  const at = (k, win) => collectPoints(g, (k + 0.5) / fps, { ...DEFAULTS, windowSec: win }, { fps }).n;
+  assert.equal(at(2, 0), 1); assert.equal(at(5, 0), 0);
+  assert.equal(at(2, 0.08), 5, '±2 frames around frame 2 all lie inside the fixation');
+  assert.equal(at(5, 0.08), 2, 'frames 3 and 4 only');
+});
+
+test('files of a whole dataset folder are matched to the loaded video', () => {
+  assert.ok(pathMatchesVideo('Gaze_txt_files/p003/001._2017-10-03-18-55_ori_0.txt', '001'));
+  assert.ok(!pathMatchesVideo('Gaze_txt_files/p003/0010._2017-10-03_ori_0.txt', '001'));
+  assert.ok(pathMatchesVideo('Fixation_per_user_per_video/videos-audios/-ZrvrKMC7Tc-28/0b4b.txt', '-ZrvrKMC7Tc-28'));
+  assert.ok(!pathMatchesVideo('Fixation_per_user_per_video/videos-audios/-ZrvrKMC7Tc-280/0b4b.txt', '-ZrvrKMC7Tc-28'));
+});
+
+test('frame rate from decoded frame gaps survives whole-millisecond timestamps (29.97 fps in WebM)', () => {
+  const t = []; let x = 0.5;
+  for (let i = 0; i < 40; i++) { const n = x + 1 / 29.97; t.push(Math.round(n * 1000) / 1000 - Math.round(x * 1000) / 1000); x = n; }
+  assert.equal(fpsFromDeltas(t), 29.97);
+  assert.equal(fpsFromDeltas(Array(40).fill(0.04)), 25);
+});

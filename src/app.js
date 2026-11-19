@@ -1,0 +1,996 @@
+import { buildGaze, columnValues, defaultRanges, detectMapping, gazeToCsv, parseTable, pathMatchesVideo, velocityFilter } from './gaze.js';
+import { DEFAULTS, coverage, frameCentre, frameOf, mapSize, renderMap } from './saliency.js';
+import { FlowStore, toGray } from './flow.js';
+import { ZipWriter, encodeGrayPng, npyHeader } from './export.js';
+import { fpsFromDeltas } from './timing.js';
+import { COLORMAPS, colorize, cssGradient } from './colormap.js';
+
+const VERSION = '1.0.0';
+const $ = id => document.getElementById(id);
+const video = $('video');
+const heatCanvas = $('heat-canvas'), marksCanvas = $('marks-canvas'), densityCanvas = $('density-canvas');
+const GAZE_EXT = /\.(csv|tsv|txt|json|arff|dat)$/i, VIDEO_EXT = /\.(mp4|m4v|webm|mkv|mov|ogv)$/i;
+
+const state = {
+  video: null, fps: 30, fpsSource: 'default', fpsDeltas: [], lastFrameMeta: null, mediaTime: 0,
+  files: [], mapping: null, gazeAll: null, gaze: null, observerEnabled: null, conditionEnabled: null,
+  settings: { ...DEFAULTS, velocity: 0 },
+  display: { mode: 'heat', colormap: 'jet', opacity: 0.65, gamma: 1, mapWidth: 512, showPoints: true, showFlow: false },
+  flow: null, flowInfo: null, analysing: null, exporting: null, recording: null,
+  work: {}, last: null, renderQueued: false, projectionTouched: false, density: null
+};
+
+// Handle for the tests and the console: mapAt(frame, width) renders the same map the export writes (raw, unnormalised).
+window.overgaze = {
+  state, applySettings: o => applySettings(o),
+  mapAt(k, width = 512, normalize = 'none') {
+    const [vw, vh] = videoSize(), [W, H] = mapSize(width, state.settings, vw, vh);
+    const r = renderMap(state.gaze, frameCentre(k, state.fps), settingsForRender(normalize), W, H, renderContext(), {});
+    return { W, H, map: Array.from(r.map), points: r.points.n };
+  }
+};
+
+// ---------- helpers ----------
+const fmt = (x, d = 3) => Number.isFinite(x) ? x.toFixed(d) : '—';
+const pct = x => Number.isFinite(x) ? `${(100 * x).toFixed(2)} %` : '—';
+const bytesText = b => b > 1e9 ? `${(b / 1e9).toFixed(2)} GB` : b > 1e6 ? `${(b / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1e3))} kB`;
+const obsColor = i => `hsl(${(i * 137.508) % 360} 80% 62%)`;
+function setStatus(text) { $('status').textContent = text; }
+function notice(text, warn = false) {
+  const n = $('notice');
+  n.hidden = !text; n.textContent = text || ''; n.classList.toggle('warn', warn);
+}
+function showError(text) { const e = $('error-message'); e.hidden = !text; e.textContent = text || ''; }
+function download(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+function stem(name) { return (name || 'video').replace(/[?#].*$/, '').split('/').pop().replace(/\.[^.]+$/, '') || 'video'; }
+function videoSize() { return [video.videoWidth || 2, video.videoHeight || 1]; }
+function settingsForRender(normalize = 'max') { return { ...state.settings, normalize }; }
+function renderContext() {
+  return { fps: state.fps, tol: 0.5 / state.fps, observerEnabled: state.observerEnabled, conditionEnabled: state.conditionEnabled, flow: state.settings.motionComp ? state.flow : null };
+}
+function currentFrame() {
+  const k = frameOf(video.paused ? video.currentTime : state.mediaTime, state.fps);
+  return [k, frameCentre(k, state.fps)];
+}
+
+// ---------- video ----------
+function isYouTube(url) { return /(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com)$/i.test(new URL(url, location.href).hostname); }
+
+function resetVideoState() {
+  state.flow = null; state.flowInfo = null; state.fpsDeltas = []; state.fpsSource = 'default'; state.mediaTime = 0;
+  updateFlowUi();
+}
+
+function loadVideoFile(file) {
+  if (state.video?.blobUrl) URL.revokeObjectURL(state.video.blobUrl);
+  const src = URL.createObjectURL(file);
+  state.video = { name: file.name, size: file.size, src, blobUrl: src, remote: false, tainted: false };
+  resetVideoState();
+  video.removeAttribute('crossorigin');
+  video.src = src;
+  setStatus('Loading video…');
+}
+
+function loadVideoUrl(url, { sameOrigin = false } = {}) {
+  showError('');
+  try {
+    if (!sameOrigin && isYouTube(url)) {
+      showError('YouTube pages cannot be used directly: the browser gets no access to the frames, and YouTube shows a 360° viewport rather than the equirectangular frame. Download the video file (for example with yt-dlp) and load it from disk, or use a direct link to an .mp4 / .webm file.');
+      return;
+    }
+  } catch { showError('That link is not a valid URL.'); return; }
+  if (state.video?.blobUrl) URL.revokeObjectURL(state.video.blobUrl);
+  state.video = { name: stem(url) + (url.match(/\.[a-z0-9]{2,4}(?=$|[?#])/i)?.[0] || ''), size: null, src: url, remote: !sameOrigin, tainted: false, triedPlain: false };
+  resetVideoState();
+  if (!sameOrigin) video.crossOrigin = 'anonymous'; else video.removeAttribute('crossorigin');
+  video.src = url;
+  setStatus('Loading video…');
+}
+
+video.addEventListener('error', () => {
+  const v = state.video;
+  if (!v) return;
+  if (v.remote && !v.triedPlain && video.crossOrigin) {
+    // The server does not send CORS headers: retry for display only.
+    v.triedPlain = true; v.tainted = true;
+    video.removeAttribute('crossorigin');
+    video.src = v.src;
+    return;
+  }
+  showError(`The video could not be loaded (${video.error?.message || 'unsupported format or unreachable link'}). Browsers play H.264 / VP9 / AV1 in MP4 or WebM; H.265 works only in some browsers.`);
+  setStatus('Video failed');
+});
+
+video.addEventListener('loadedmetadata', () => {
+  const [vw, vh] = videoSize();
+  $('stage').style.setProperty('--aspect', String(vw / vh));
+  $('empty-state').hidden = true; $('stage-wrap').hidden = false;
+  if (!state.projectionTouched) {
+    const erp = Math.abs(vw / vh - 2) < 0.02;
+    state.settings.projection = erp ? 'erp' : 'planar';
+    $('projection').value = state.settings.projection; $('fov-row').hidden = erp;
+  }
+  $('video-name').textContent = state.video.name; $('video-name').title = state.video.name;
+  $('video-size').textContent = `${vw} × ${vh}${state.video.size ? ' · ' + bytesText(state.video.size) : ''}`;
+  $('video-duration').textContent = `${fmt(video.duration, 2)} s`;
+  $('viewer-name').textContent = state.video.name;
+  $('scrubber').max = String(video.duration || 1);
+  $('ex-start').value = '0'; $('ex-end').value = fmt(video.duration, 2);
+  ['play', 'prev-frame', 'next-frame', 'scrubber'].forEach(id => { $(id).disabled = false; });
+  setStatus('Video ready');
+  // Gaze in pixels that was loaded before the video: now the frame size is known, so are the value ranges.
+  const m = state.mapping;
+  if (m && m.coord === 'pixels' && !m.rangesTouched && state.files.length) {
+    const t = state.files[0].table;
+    Object.assign(m, defaultRanges('pixels', columnValues(t, m.x), columnValues(t, m.y), { width: vw, height: vh }));
+    populateMappingForm(); rebuildGaze();
+  }
+  updateSubtitle(); updateButtons(); updateExportSummary(); drawDensity();
+  detectFps();
+});
+
+video.addEventListener('loadeddata', () => {
+  const v = state.video;
+  if (!v.tainted) {
+    try {
+      const c = document.createElement('canvas'); c.width = c.height = 2;
+      const g = c.getContext('2d'); g.drawImage(video, 0, 0, 2, 2); g.getImageData(0, 0, 1, 1);
+    } catch { v.tainted = true; }
+  }
+  $('video-access').textContent = v.tainted ? 'display only (no CORS)' : 'readable';
+  if (v.tainted) notice('This link is shown without access to its pixels (the server sends no CORS headers). The heatmap overlay and map export work; motion analysis, snapshots and overlay recording need a local file or a CORS-enabled link.', true);
+  updateButtons(); requestRender();
+});
+
+function updateSubtitle() {
+  const parts = [];
+  if (state.video) { const [vw, vh] = videoSize(); parts.push(`${vw}×${vh}`, `${fmt(state.fps, 3)} fps (${state.fpsSource})`, state.settings.projection === 'erp' ? '360° ERP' : '2D'); }
+  if (state.gaze) parts.push(`${state.gaze.n.toLocaleString()} gaze rows, ${state.gaze.observers.length} observers`);
+  $('viewer-subtitle').textContent = parts.join(' · ') || 'Load a video and gaze data';
+}
+
+function setFps(f, source) {
+  if (!(f > 0)) return;
+  state.fps = f; state.fpsSource = source;
+  $('fps').value = String(f);
+  $('fps-note').textContent = source === 'manual' ? 'Set by hand.' : source === 'measured' ? `Measured from decoded frames: ${f} fps.` : 'Default 30. Measured from decoded frames once the video plays.';
+  if (state.files.length && state.mapping && (/^frame/.test(state.mapping.timeUnit) || /^frame/.test(state.mapping.durationUnit))) rebuildGaze();
+  updateSubtitle(); updateExportSummary(); drawDensity(); requestRender();
+}
+
+async function detectFps() {
+  if (!('requestVideoFrameCallback' in HTMLVideoElement.prototype) || !state.video) return;
+  const probe = hiddenVideo();
+  try {
+    await once(probe, 'loadeddata', 8000);
+    probe.currentTime = Math.min(1, (probe.duration || 2) / 4);
+    await once(probe, 'seeked', 8000);
+    const deltas = [];
+    let last = null;
+    await probe.play();
+    await new Promise(resolve => {
+      const stop = setTimeout(resolve, 2500);
+      const cb = (now, meta) => {
+        if (last && meta.presentedFrames === last.presentedFrames + 1) deltas.push(meta.mediaTime - last.mediaTime);
+        last = meta;
+        if (deltas.length >= 40) { clearTimeout(stop); resolve(); } else probe.requestVideoFrameCallback(cb);
+      };
+      probe.requestVideoFrameCallback(cb);
+    });
+    const f = fpsFromDeltas(deltas);
+    if (f && state.fpsSource !== 'manual') setFps(f, 'measured');
+  } catch { /* fall back to measuring during playback */ }
+  finally { disposeHidden(probe); }
+}
+
+function hiddenVideo() {
+  const v = document.createElement('video');
+  v.muted = true; v.playsInline = true; v.preload = 'auto';
+  if (state.video.remote && !state.video.tainted) v.crossOrigin = 'anonymous';
+  v.style.cssText = 'position:fixed;left:-10px;top:-10px;width:4px;height:4px;opacity:0;pointer-events:none';
+  document.body.appendChild(v);
+  v.src = state.video.src;
+  return v;
+}
+function disposeHidden(v) { try { v.pause(); v.removeAttribute('src'); v.load(); v.remove(); } catch { /* ignore */ } }
+function once(target, event, timeout = 10000) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => { cleanup(); reject(new Error(`timeout waiting for ${event}`)); }, timeout);
+    const ok = () => { cleanup(); resolve(); }, bad = () => { cleanup(); reject(new Error('media error')); };
+    const cleanup = () => { clearTimeout(t); target.removeEventListener(event, ok); target.removeEventListener('error', bad); };
+    target.addEventListener(event, ok); target.addEventListener('error', bad);
+  });
+}
+
+// ---------- playback ----------
+function onVideoFrame(now, meta) {
+  state.mediaTime = meta.mediaTime;
+  const last = state.lastFrameMeta;
+  if (last && meta.presentedFrames === last.presentedFrames + 1 && video.playbackRate === 1) {
+    state.fpsDeltas.push(meta.mediaTime - last.mediaTime);
+    if (state.fpsDeltas.length === 60 && state.fpsSource === 'default') { const f = fpsFromDeltas(state.fpsDeltas); if (f) setFps(f, 'measured'); }
+  }
+  state.lastFrameMeta = meta;
+  render();
+  state.recording?.onFrame(meta);
+  if (!video.paused && !video.ended) video.requestVideoFrameCallback(onVideoFrame);
+}
+function rafLoop() {
+  if (video.paused || video.ended) return;
+  state.mediaTime = video.currentTime; render();
+  requestAnimationFrame(rafLoop);
+}
+video.addEventListener('play', () => {
+  $('play').textContent = '❚❚'; $('play').setAttribute('aria-label', 'Pause');
+  state.lastFrameMeta = null;
+  if ('requestVideoFrameCallback' in video) video.requestVideoFrameCallback(onVideoFrame); else requestAnimationFrame(rafLoop);
+});
+video.addEventListener('pause', () => { $('play').textContent = '▶'; $('play').setAttribute('aria-label', 'Play'); state.mediaTime = video.currentTime; requestRender(); });
+video.addEventListener('seeked', () => { state.mediaTime = video.currentTime; requestRender(); });
+video.addEventListener('ended', () => { state.recording?.finish(); });
+
+function togglePlay() { if (!state.video) return; if (video.paused) video.play().catch(e => showError(String(e.message || e))); else video.pause(); }
+function stepFrames(n) {
+  if (!state.video) return;
+  video.pause();
+  const k = frameOf(video.currentTime, state.fps) + n;
+  const maxK = Math.max(0, Math.ceil(video.duration * state.fps) - 1);
+  video.currentTime = frameCentre(Math.max(0, Math.min(maxK, k)), state.fps);
+}
+function seekSeconds(dt) { if (!state.video) return; video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + dt)); }
+
+// ---------- rendering ----------
+function requestRender() {
+  if (state.renderQueued) return;
+  state.renderQueued = true;
+  requestAnimationFrame(() => { state.renderQueued = false; render(); });
+}
+
+function render() {
+  if (!state.video || !video.videoWidth) return;
+  const [k, t] = currentFrame();
+  $('time-label').textContent = `${fmt(video.paused ? video.currentTime : state.mediaTime, 3)} s · frame ${k}`;
+  if (document.activeElement !== $('scrubber')) $('scrubber').value = String(video.paused ? video.currentTime : state.mediaTime);
+  const [vw, vh] = videoSize();
+  const [W, H] = mapSize(state.display.mapWidth, state.settings, vw, vh);
+  if (heatCanvas.width !== W || heatCanvas.height !== H) { heatCanvas.width = W; heatCanvas.height = H; }
+  const hctx = heatCanvas.getContext('2d');
+  let result = null;
+  if (state.gaze) {
+    const t0 = performance.now();
+    result = renderMap(state.gaze, t, settingsForRender('max'), W, H, renderContext(), state.work);
+    const ms = performance.now() - t0;
+    if (state.display.mode === 'off') hctx.clearRect(0, 0, W, H);
+    else {
+      if (!state.work.image || state.work.image.width !== W || state.work.image.height !== H) state.work.image = hctx.createImageData(W, H);
+      colorize(result.map, state.work.image.data, { colormap: state.display.colormap, opacity: state.display.opacity, gamma: state.display.gamma, mode: state.display.mode });
+      hctx.putImageData(state.work.image, 0, 0);
+    }
+    const cov = coverage(result.map, W, H, 0.1, state.settings.projection === 'erp');
+    const observers = new Set();
+    for (let i = 0; i < result.points.n; i++) observers.add(result.points.obs[i]);
+    $('ro-points').textContent = result.points.n.toLocaleString();
+    $('ro-observers').textContent = `${observers.size} / ${state.observerEnabled ? state.observerEnabled.reduce((a, b) => a + b, 0) : 0}`;
+    $('ro-coverage').textContent = result.max > 0 ? `${pct(cov.pixels)} / ${pct(cov.sphere)}` : '—';
+    $('ro-map').textContent = `${W} × ${H}`;
+    $('ro-ms').textContent = `${ms.toFixed(1)} ms per frame`;
+    $('readout-badge').hidden = false;
+    $('readout-badge').textContent = `σ ${state.settings.sigmaDeg}° · ±${state.settings.windowSec} s${state.settings.causal ? ' past' : ''}${state.settings.motionComp && state.flow ? ' · motion-comp.' : ''}`;
+  } else hctx.clearRect(0, 0, W, H);
+  state.last = { t, k, result, W, H };
+  drawMarks(t, result);
+  drawPlayhead();
+}
+
+function drawMarks(t, result) {
+  const rect = $('stage').getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  const cw = Math.max(1, Math.round(rect.width * dpr)), ch = Math.max(1, Math.round(rect.height * dpr));
+  if (marksCanvas.width !== cw || marksCanvas.height !== ch) { marksCanvas.width = cw; marksCanvas.height = ch; }
+  const g = marksCanvas.getContext('2d');
+  g.clearRect(0, 0, cw, ch);
+  const TAU = Math.PI * 2;
+  if (state.display.showFlow && state.flow) {
+    const f = state.flow, stepPx = 26 * dpr, scale = 0.5; // arrow = displacement over 0.5 s
+    g.strokeStyle = 'rgba(200,245,106,0.85)'; g.lineWidth = 1.2 * dpr;
+    for (let y = stepPx / 2; y < ch; y += stepPx) for (let x = stepPx / 2; x < cw; x += stepPx) {
+      const fx = x / cw * f.W - 0.5, fy = y / ch * f.H - 0.5;
+      const [u, v] = f.velocity(t, fx, fy);
+      const dx = u * scale * cw / f.W, dy = v * scale * ch / f.H;
+      if (Math.hypot(dx, dy) < 0.8 * dpr) { g.fillStyle = 'rgba(200,245,106,0.35)'; g.fillRect(x - dpr, y - dpr, 2 * dpr, 2 * dpr); continue; }
+      g.beginPath(); g.moveTo(x, y); g.lineTo(x + dx, y + dy);
+      const a = Math.atan2(dy, dx), hl = 4 * dpr;
+      g.lineTo(x + dx - hl * Math.cos(a - 0.5), y + dy - hl * Math.sin(a - 0.5));
+      g.moveTo(x + dx, y + dy); g.lineTo(x + dx - hl * Math.cos(a + 0.5), y + dy - hl * Math.sin(a + 0.5));
+      g.stroke();
+    }
+  }
+  if (state.display.showPoints && result) {
+    const p = result.points;
+    let wmax = 0;
+    for (let i = 0; i < p.n; i++) wmax = Math.max(wmax, p.w[i]);
+    for (let i = 0; i < p.n; i++) {
+      const x = (p.lon[i] / TAU + 0.5) * cw, y = (0.5 - p.lat[i] / Math.PI) * ch;
+      const r = (1.6 + 2.6 * (wmax > 0 ? p.w[i] / wmax : 1)) * dpr;
+      g.beginPath(); g.arc(x, y, r, 0, TAU);
+      g.fillStyle = obsColor(p.obs[i]); g.globalAlpha = 0.35 + 0.65 * (wmax > 0 ? p.w[i] / wmax : 1); g.fill();
+      g.globalAlpha = 1; g.lineWidth = 1 * dpr; g.strokeStyle = 'rgba(0,0,0,0.7)'; g.stroke();
+    }
+  }
+}
+
+// ---------- density strip ----------
+function computeDensity() {
+  const g = state.gaze;
+  if (!g || !state.video || !video.duration) { state.density = null; return; }
+  const bins = Math.min(1200, Math.max(50, Math.round(video.duration * 10)));
+  const counts = new Float32Array(bins), dt = video.duration / bins;
+  for (let i = 0; i < g.n; i++) {
+    if (state.observerEnabled && !state.observerEnabled[g.obs[i]]) continue;
+    if (state.conditionEnabled && !state.conditionEnabled[g.cond[i]]) continue;
+    const a = Math.max(0, Math.floor(g.t0[i] / dt)), b = Math.min(bins - 1, Math.floor(g.t1[i] / dt));
+    for (let k = a; k <= b && k < bins; k++) counts[k] += 1;
+  }
+  state.density = counts;
+}
+function drawDensity() { computeDensity(); drawPlayhead(); }
+function drawPlayhead() {
+  const dpr = window.devicePixelRatio || 1, w = Math.max(1, Math.round(densityCanvas.clientWidth * dpr)), h = Math.max(1, Math.round(densityCanvas.clientHeight * dpr));
+  if (densityCanvas.width !== w || densityCanvas.height !== h) { densityCanvas.width = w; densityCanvas.height = h; }
+  const g = densityCanvas.getContext('2d');
+  g.clearRect(0, 0, w, h);
+  const d = state.density;
+  if (d) {
+    let max = 0; for (const v of d) max = Math.max(max, v);
+    g.fillStyle = 'rgba(200,245,106,0.45)';
+    const bw = w / d.length;
+    for (let i = 0; i < d.length; i++) if (d[i] > 0) { const bh = Math.max(1, d[i] / max * (h - 2)); g.fillRect(i * bw, h - bh, Math.max(1, bw), bh); }
+    const a = Number($('ex-start').value) || 0, b = Number($('ex-end').value) || 0;
+    if (video.duration && b > a) { g.fillStyle = 'rgba(255,255,255,0.06)'; g.fillRect(a / video.duration * w, 0, (b - a) / video.duration * w, h); }
+  }
+  if (state.video && video.duration) {
+    const x = (video.paused ? video.currentTime : state.mediaTime) / video.duration * w;
+    g.fillStyle = '#ffffff'; g.fillRect(Math.round(x), 0, Math.max(1, dpr), h);
+  }
+}
+densityCanvas.addEventListener('click', e => {
+  if (!state.video) return;
+  const r = densityCanvas.getBoundingClientRect();
+  video.currentTime = Math.max(0, Math.min(video.duration, (e.clientX - r.left) / r.width * video.duration));
+});
+
+// ---------- gaze loading ----------
+async function loadGazeFiles(list) {
+  let files = [...list].filter(f => GAZE_EXT.test(f.name) && !f.name.startsWith('.'));
+  if (!files.length) { notice('No gaze files found (expected .csv, .tsv, .txt, .json, .arff or .dat).', true); return; }
+  const relOf = f => f.webkitRelativePath || f.relativePath || f.name;
+  const userFilter = $('gaze-filter').value.trim();
+  let note = '';
+  if (userFilter) {
+    const kept = files.filter(f => relOf(f).includes(userFilter));
+    note = `${kept.length} of ${files.length} files contain “${userFilter}” in their path.`;
+    files = kept;
+  } else if (files.length > 1 && state.video) {
+    const key = stem(state.video.name), kept = files.filter(f => pathMatchesVideo(relOf(f), key));
+    if (kept.length && kept.length < files.length) { note = `Used the ${kept.length} of ${files.length} files that belong to “${key}”.`; files = kept; }
+  }
+  if (!files.length) { notice(`${note} Nothing left to load.`, true); return; }
+  setStatus(`Reading ${files.length} gaze file(s)…`);
+  const parsed = [], failed = [];
+  for (const f of files) {
+    try {
+      const parts = relOf(f).split('/');
+      parsed.push({ name: f.name, folder: parts.length > 1 ? parts[parts.length - 2] : '', folder2: parts.length > 2 ? parts[parts.length - 3] : '', table: parseTable(await f.text(), f.name) });
+    } catch (e) { failed.push(`${f.name}: ${e.message}`); }
+  }
+  setStatus(state.video ? 'Video ready' : 'Gaze loaded');
+  if (!parsed.length) { notice(`Could not read the gaze files. ${failed.slice(0, 3).join(' ')}`, true); return; }
+  // Keep files whose columns match the first one; report the rest.
+  const ref = parsed[0].table.columns.join('|');
+  const same = parsed.filter(p => p.table.columns.join('|') === ref);
+  const other = parsed.filter(p => p.table.columns.join('|') !== ref);
+  state.files = same;
+  state.mapping = detectMapping(same[0].table, { duration: video.duration || 60, width: video.videoWidth || 0, height: video.videoHeight || 0 });
+  if (same.length === 1 && state.mapping.observerFrom === 'file') state.mapping.observerFrom = 'none';
+  const folders = new Set(same.map(f => f.folder));
+  if (state.mapping.conditionFrom === 'none' && folders.size > 1 && !state.mapping.preset) state.mapping.conditionFrom = 'folder';
+  const presetNote = applyDatasetDefaults(state.mapping);
+  populateMappingForm();
+  rebuildGaze();
+  const msgs = [note, presetNote].filter(Boolean);
+  if (other.length) msgs.push(`${other.length} file(s) with different columns were skipped (${other.slice(0, 2).map(o => o.name).join(', ')}…).`);
+  if (failed.length) msgs.push(`${failed.length} file(s) could not be read.`);
+  notice(msgs.join(' '), other.length > 0 || failed.length > 0);
+}
+
+/** Known datasets get their usual settings the first time their files are recognised. */
+function applyDatasetDefaults(m) {
+  if (!m.preset) return '';
+  const msg = [];
+  if (!state.projectionTouched) { state.settings.projection = 'erp'; $('projection').value = 'erp'; $('fov-row').hidden = true; }
+  if (m.preset === 'vret') {
+    applySettings({ velocity: 75 });
+    msg.push('Recognised VR-EyeTracking gaze (eye position, y from the bottom, one sample per frame): speed filter set to 75°/s.');
+  }
+  if (m.preset === 'yt360') {
+    const start = /-(\d+)$/.exec(state.video ? stem(state.video.name) : '');
+    if (start && video.duration > 35) {
+      m.timeOffset = Number(start[1]);
+      if (Number.isFinite(video.duration)) video.currentTime = m.timeOffset;
+      msg.push(`Recognised YT360-EyeTracking fixations. The video is the full download, so gaze times are shifted by the clip start (${m.timeOffset} s).`);
+    } else msg.push('Recognised YT360-EyeTracking fixations (times in seconds from the clip start).');
+  }
+  return msg.join(' ');
+}
+
+async function loadGazeUrl(url) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const name = stem(url) + (url.match(/\.[a-z]{3,4}(?=$|[?#])/i)?.[0] || '.csv');
+    await loadGazeFiles([new File([await res.text()], name)]);
+  } catch (e) { notice(`Could not fetch the gaze file (${e.message}). The server must allow cross-origin requests (CORS).`, true); }
+}
+
+function populateMappingForm() {
+  const m = state.mapping, cols = state.files[0].table.columns;
+  document.querySelectorAll('select[data-map]').forEach(sel => {
+    const key = sel.dataset.map;
+    if (['time', 'x', 'y', 'z', 'end', 'duration', 'observer', 'condition', 'weight'].includes(key)) {
+      sel.innerHTML = `<option value="">— none —</option>` + cols.map(c => `<option>${escapeHtml(c)}</option>`).join('');
+    }
+    sel.value = m[key] ?? '';
+  });
+  document.querySelectorAll('input[data-map]').forEach(inp => { inp.value = m[inp.dataset.map] ?? ''; });
+  $('map-z-wrap').hidden = m.coord !== 'vector';
+  $('mapping-section').hidden = false;
+  renderPreview();
+}
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function renderPreview() {
+  const t = state.files[0].table, m = state.mapping;
+  const used = new Set([m.time, m.x, m.y, m.z, m.end, m.duration, m.observer, m.condition, m.weight].filter(Boolean));
+  const rows = t.rows.slice(0, 6);
+  $('preview-table').innerHTML = `<table><thead><tr>${t.columns.map(c => `<th class="${used.has(c) ? 'used' : ''}">${escapeHtml(c)}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${t.columns.map((_, i) => `<td>${escapeHtml(r[i] ?? '')}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+}
+
+let rebuildTimer = 0;
+function onMappingChange(e) {
+  const key = e.target.dataset.map, m = state.mapping;
+  const numeric = ['xLeft', 'xRight', 'yTop', 'yBottom', 'timeOffset'].includes(key);
+  m[key] = numeric ? Number(e.target.value) : e.target.value;
+  if (['xLeft', 'xRight', 'yTop', 'yBottom'].includes(key)) m.rangesTouched = true;
+  if (key === 'coord') {
+    const t = state.files[0].table;
+    Object.assign(m, defaultRanges(m.coord, columnValues(t, m.x), columnValues(t, m.y), { width: video.videoWidth, height: video.videoHeight }));
+    if (m.coord === 'vector' && !m.z) m.z = t.columns.find(c => /^z$/i.test(c)) || '';
+    populateMappingForm();
+  }
+  if (key === 'timeUnit' && !m.duration) m.durationUnit = m.timeUnit;
+  $('map-z-wrap').hidden = m.coord !== 'vector';
+  renderPreview();
+  clearTimeout(rebuildTimer);
+  rebuildTimer = setTimeout(rebuildGaze, 120);
+}
+document.querySelectorAll('[data-map]').forEach(el => el.addEventListener('change', onMappingChange));
+
+function rebuildGaze() {
+  $('mapping-error').hidden = true;
+  if (!state.files.length) return;
+  try {
+    const prevObs = state.gaze ? new Map(state.gaze.observers.map((o, i) => [o, state.observerEnabled[i]])) : null;
+    const prevCond = state.gaze ? new Map(state.gaze.conditions.map((c, i) => [c, state.conditionEnabled[i]])) : null;
+    state.gazeAll = buildGaze(state.files, state.mapping, { fps: state.fps });
+    state.gaze = velocityFilter(state.gazeAll, state.settings.velocity);
+    state.observerEnabled = Uint8Array.from(state.gaze.observers, o => prevObs?.has(o) ? prevObs.get(o) : 1);
+    state.conditionEnabled = Uint8Array.from(state.gaze.conditions, c => prevCond?.has(c) ? prevCond.get(c) : 1);
+  } catch (e) {
+    state.gaze = null;
+    $('mapping-error').hidden = false; $('mapping-error').textContent = e.message;
+  }
+  renderGroups(); updateGazeSummary(); drawDensity(); updateSubtitle(); updateButtons(); updateExportSummary(); requestRender();
+}
+
+function updateGazeSummary() {
+  const g = state.gaze, el = $('gaze-summary');
+  if (!g) { el.textContent = state.files.length ? 'Check the column mapping.' : 'No gaze loaded. One file per observer, or one file with an observer column.'; return; }
+  const kind = g.hasDuration ? 'fixations' : 'samples';
+  let text = `${state.files.length} file(s), ${g.n.toLocaleString()} ${kind}, ${g.observers.length} observer(s), ${g.conditions.length} condition(s), ${fmt(g.tMin, 2)}–${fmt(g.tMax, 2)} s.`;
+  if (state.gazeAll && state.gazeAll.skipped) text += ` ${state.gazeAll.skipped} unreadable row(s) skipped.`;
+  if (g.filtered) text += ` Velocity filter removed ${g.filtered.toLocaleString()}.`;
+  el.textContent = text;
+  if (video.duration && (g.tMax > video.duration * 1.5 + 1 || g.tMax < video.duration * 0.2)) notice(`Gaze times run to ${fmt(g.tMax, 1)} s but the video lasts ${fmt(video.duration, 1)} s: check the time unit or the time offset in the column mapping.`, true);
+}
+
+function renderGroups() {
+  const g = state.gaze;
+  $('groups-section').hidden = !g;
+  if (!g) return;
+  const condCounts = new Array(g.conditions.length).fill(0), obsCounts = new Array(g.observers.length).fill(0);
+  for (let i = 0; i < g.n; i++) { condCounts[g.cond[i]]++; obsCounts[g.obs[i]]++; }
+  $('condition-list').innerHTML = g.conditions.length > 1
+    ? g.conditions.map((c, i) => `<label class="chip"><input type="checkbox" data-cond="${i}" ${state.conditionEnabled[i] ? 'checked' : ''}>${escapeHtml(c)} <small>${condCounts[i]}</small></label>`).join('')
+    : '';
+  $('observer-count').textContent = `${g.observers.length} observer${g.observers.length === 1 ? '' : 's'}`;
+  $('observer-list').innerHTML = g.observers.map((o, i) => `<label class="observer-row"><input type="checkbox" data-obs="${i}" ${state.observerEnabled[i] ? 'checked' : ''}><i style="background:${obsColor(i)}"></i><span title="${escapeHtml(o)}">${escapeHtml(o)}</span><small>${obsCounts[i]}</small></label>`).join('');
+}
+$('observer-list').addEventListener('change', e => { const i = e.target.dataset.obs; if (i == null) return; state.observerEnabled[i] = e.target.checked ? 1 : 0; drawDensity(); requestRender(); });
+$('condition-list').addEventListener('change', e => { const i = e.target.dataset.cond; if (i == null) return; state.conditionEnabled[i] = e.target.checked ? 1 : 0; drawDensity(); requestRender(); });
+$('obs-all').addEventListener('click', () => { if (!state.gaze) return; state.observerEnabled.fill(1); renderGroups(); drawDensity(); requestRender(); });
+$('obs-none').addEventListener('click', () => { if (!state.gaze) return; state.observerEnabled.fill(0); renderGroups(); drawDensity(); requestRender(); });
+
+// ---------- motion analysis ----------
+function updateFlowUi() {
+  const f = state.flow;
+  $('motion').disabled = !f; $('show-flow').disabled = !f; $('clear-flow').disabled = !f;
+  if (f && state.wantMotion && !state.settings.motionComp) { state.settings.motionComp = true; $('motion').checked = true; }
+  if (!f) { $('motion').checked = false; state.settings.motionComp = false; $('show-flow').checked = false; state.display.showFlow = false; }
+  $('flow-status').textContent = f
+    ? `${f.size} flow fields at ${f.W} × ${f.H}, ${fmt(f.times[0] - f.step / 2, 2)}–${fmt(f.times[f.size - 1] + f.step / 2, 2)} s, one every ${fmt(f.step, 3)} s, ${bytesText(f.bytes)}.`
+    : state.video?.tainted ? 'Needs pixel access: load the video from disk or a CORS-enabled link.' : 'Not analysed.';
+  updateButtons();
+}
+
+async function analyseMotion() {
+  if (state.analysing) { state.analysing.cancel = true; return; }
+  if (!state.video || state.video.tainted) return;
+  const [vw, vh] = videoSize();
+  const rate = Number($('flow-rate').value), [W, H] = mapSize(Number($('flow-width').value), state.settings, vw, vh);
+  const wrap = state.settings.projection === 'erp';
+  let a = 0, b = video.duration;
+  if ($('flow-range').value === 'export') { a = Math.max(0, Number($('ex-start').value) || 0); b = Math.min(video.duration, Number($('ex-end').value) || video.duration); }
+  const store = state.flow && state.flow.W === W && state.flow.H === H && state.flow.wrap === wrap ? state.flow : new FlowStore(W, H, { wrap });
+  const job = { cancel: false };
+  state.analysing = job;
+  $('analyse').textContent = 'Cancel analysis'; $('flow-progress').hidden = false;
+  const bar = $('flow-progress').firstElementChild;
+  const probe = hiddenVideo();
+  const canvas = document.createElement('canvas'); canvas.width = W; canvas.height = H;
+  const g = canvas.getContext('2d', { willReadFrequently: true });
+  const worker = new Worker(new URL('./flow-worker.js', import.meta.url), { type: 'module' });
+  const pending = new Map();
+  let seq = 0, failures = 0;
+  worker.onmessage = e => { const p = pending.get(e.data.id); pending.delete(e.data.id); p?.(e.data); };
+  const submit = (A, B, tA, tB) => new Promise(resolve => {
+    const id = ++seq;
+    pending.set(id, msg => { if (msg.error) failures++; else store.add(tA, tB, msg.u, msg.v); resolve(); });
+    worker.postMessage({ id, a: A, b: B, W, H, wrap });
+  });
+  const grab = () => { g.drawImage(probe, 0, 0, W, H); return toGray(g.getImageData(0, 0, W, H).data, W, H); };
+  const started = performance.now();
+  try {
+    await once(probe, 'loadeddata', 15000);
+    let prev = null, prevT = 0;
+    const inflight = [];
+    const push = async (img, t) => {
+      if (prev) { inflight.push(submit(prev, img, prevT, t)); if (inflight.length > 3) await inflight.shift(); }
+      prev = img; prevT = t;
+      bar.style.width = `${Math.min(100, 100 * (t - a) / Math.max(1e-6, b - a))}%`;
+      setStatus(`Analysing motion… ${fmt(t, 1)} / ${fmt(b, 1)} s`);
+    };
+    if ($('flow-method').value === 'seek' || !('requestVideoFrameCallback' in probe)) {
+      for (let t = a; t <= b - 0.25 / state.fps && !job.cancel; t += 1 / rate) {
+        const k = frameOf(t, state.fps), tc = frameCentre(k, state.fps);
+        probe.currentTime = tc;
+        await once(probe, 'seeked', 15000);
+        await new Promise(r => ('requestVideoFrameCallback' in probe) ? (probe.requestVideoFrameCallback(() => r()), setTimeout(r, 300)) : setTimeout(r, 30));
+        await push(grab(), tc);
+      }
+    } else {
+      probe.currentTime = a;
+      await once(probe, 'seeked', 15000);
+      probe.playbackRate = 1;
+      await new Promise((resolve, reject) => {
+        let lastGrab = -Infinity, busy = false;
+        const finish = () => { probe.pause(); resolve(); };
+        probe.addEventListener('ended', finish, { once: true });
+        const cb = async (now, meta) => {
+          const t = meta.mediaTime;
+          if (job.cancel || t >= b) { finish(); return; }
+          if (!busy && t - lastGrab >= 1 / rate - 0.25 / state.fps) {
+            busy = true; lastGrab = t;
+            try { await push(grab(), t); } catch (e) { reject(e); return; } finally { busy = false; }
+          }
+          probe.requestVideoFrameCallback(cb);
+        };
+        probe.requestVideoFrameCallback(cb);
+        probe.play().catch(reject);
+      });
+    }
+    await Promise.all(inflight);
+    while (pending.size) await new Promise(r => setTimeout(r, 20));
+    if (store.size) {
+      state.flow = store;
+      state.flowInfo = { rate, method: $('flow-method').value, from: a, to: b, seconds: (performance.now() - started) / 1000, failures };
+    }
+    setStatus(job.cancel ? 'Motion analysis cancelled' : `Motion analysed in ${fmt((performance.now() - started) / 1000, 1)} s`);
+    if (store.size && !job.cancel) { $('motion').checked = true; state.settings.motionComp = true; }
+  } catch (e) {
+    showError(`Motion analysis failed: ${e.message}`);
+    setStatus('Motion analysis failed');
+  } finally {
+    worker.terminate(); disposeHidden(probe);
+    state.analysing = null;
+    $('analyse').textContent = 'Analyse motion'; $('flow-progress').hidden = true; bar.style.width = '0';
+    updateFlowUi(); requestRender();
+  }
+}
+
+// ---------- settings & display controls ----------
+function bindPair(rangeId, numId, apply) {
+  const r = $(rangeId), n = $(numId);
+  r.addEventListener('input', () => { n.value = r.value; apply(Number(r.value)); });
+  n.addEventListener('change', () => { const v = Number(n.value); if (!Number.isFinite(v)) return; r.value = String(v); apply(v); });
+}
+bindPair('sigma', 'sigma-num', v => { state.settings.sigmaDeg = Math.max(0.05, v); onSettings(); });
+bindPair('window', 'window-num', v => { state.settings.windowSec = Math.max(0, v); onSettings(); });
+bindPair('lon-offset', 'lon-offset-num', v => { state.settings.lonOffsetDeg = v; onSettings(); });
+$('projection').addEventListener('change', e => { state.projectionTouched = true; state.settings.projection = e.target.value; $('fov-row').hidden = e.target.value !== 'planar'; updateSubtitle(); onSettings(); });
+$('fov').addEventListener('change', e => { state.settings.planarFovDeg = Math.max(1, Number(e.target.value) || 90); onSettings(); });
+$('kernel').addEventListener('change', e => { state.settings.kernel = e.target.value; onSettings(); });
+$('causal').addEventListener('change', e => { state.settings.causal = e.target.checked; onSettings(); });
+$('duration-weight').addEventListener('change', e => { state.settings.durationWeight = e.target.checked; onSettings(); });
+$('fps').addEventListener('change', e => { const f = Number(e.target.value); if (f > 0) { setFps(f, 'manual'); if (/^frame/.test(state.mapping?.timeUnit) || /^frame/.test(state.mapping?.durationUnit)) rebuildGaze(); } });
+$('motion').addEventListener('change', e => { state.settings.motionComp = e.target.checked; onSettings(); });
+$('show-flow').addEventListener('change', e => { state.display.showFlow = e.target.checked; requestRender(); });
+$('vel').addEventListener('change', e => { state.settings.velocity = Math.max(0, Number(e.target.value) || 0); if (state.gazeAll) { state.gaze = velocityFilter(state.gazeAll, state.settings.velocity); updateGazeSummary(); drawDensity(); } onSettings(); });
+$('flip-x').addEventListener('change', e => { state.settings.flipX = e.target.checked; onSettings(); });
+$('flip-y').addEventListener('change', e => { state.settings.flipY = e.target.checked; onSettings(); });
+$('mode').addEventListener('change', e => { state.display.mode = e.target.value; requestRender(); });
+$('colormap').innerHTML = COLORMAPS.map(c => `<option value="${c}">${c[0].toUpperCase() + c.slice(1)}</option>`).join('');
+$('colormap').addEventListener('change', e => { state.display.colormap = e.target.value; $('color-ramp').style.background = cssGradient(e.target.value); requestRender(); });
+$('color-ramp').style.background = cssGradient('jet');
+$('opacity').addEventListener('input', e => { state.display.opacity = Number(e.target.value) / 100; $('opacity-value').textContent = `${e.target.value}%`; requestRender(); });
+$('gamma').addEventListener('input', e => { state.display.gamma = Number(e.target.value); $('gamma-value').textContent = Number(e.target.value).toFixed(2); requestRender(); });
+$('map-width').addEventListener('change', e => { state.display.mapWidth = Number(e.target.value); requestRender(); });
+$('show-points').addEventListener('change', e => { state.display.showPoints = e.target.checked; requestRender(); });
+$('speed').addEventListener('change', e => { video.playbackRate = Number(e.target.value); });
+function onSettings() { updateExportSummary(); requestRender(); }
+
+/** Set several settings at once and keep the controls in step (used by presets, the address bar and the tests). */
+function applySettings(o) {
+  const S = state.settings;
+  const pair = (key, rid, nid, min = 0) => { if (key in o) { S[key === 'sigmaDeg' ? 'sigmaDeg' : key] = Math.max(min, Number(o[key])); $(rid).value = $(nid).value = String(S[key]); } };
+  pair('sigmaDeg', 'sigma', 'sigma-num', 0.05); pair('windowSec', 'window', 'window-num'); pair('lonOffsetDeg', 'lon-offset', 'lon-offset-num', -360);
+  if ('kernel' in o) { S.kernel = o.kernel; $('kernel').value = o.kernel; }
+  for (const [key, id] of [['causal', 'causal'], ['durationWeight', 'duration-weight'], ['flipX', 'flip-x'], ['flipY', 'flip-y']]) if (key in o) { S[key] = !!o[key]; $(id).checked = !!o[key]; }
+  if ('motionComp' in o) { S.motionComp = !!o.motionComp && !!state.flow; $('motion').checked = S.motionComp; state.wantMotion = !!o.motionComp; }
+  if ('velocity' in o) {
+    S.velocity = Math.max(0, Number(o.velocity) || 0); $('vel').value = String(S.velocity);
+    if (state.gazeAll) { state.gaze = velocityFilter(state.gazeAll, S.velocity); updateGazeSummary(); drawDensity(); }
+  }
+  onSettings();
+}
+$('preset-dataset').addEventListener('click', () => applySettings({ sigmaDeg: 3, windowSec: 1, kernel: 'gaussian', causal: false, motionComp: true, velocity: state.mapping?.preset === 'yt360' ? 0 : 75 }));
+
+$('play').addEventListener('click', togglePlay);
+$('prev-frame').addEventListener('click', () => stepFrames(-1));
+$('next-frame').addEventListener('click', () => stepFrames(1));
+$('scrubber').addEventListener('input', e => { video.currentTime = Number(e.target.value); });
+$('analyse').addEventListener('click', analyseMotion);
+$('clear-flow').addEventListener('click', () => { state.flow = null; state.flowInfo = null; updateFlowUi(); requestRender(); });
+
+document.addEventListener('keydown', e => {
+  if (e.target.closest('input, select, textarea') && e.target.type !== 'range' && e.target.type !== 'checkbox') return;
+  if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); e.shiftKey ? seekSeconds(1) : stepFrames(1); }
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); e.shiftKey ? seekSeconds(-1) : stepFrames(-1); }
+  else if (e.key === 'm' || e.key === 'M') { if (!$('motion').disabled) { $('motion').checked = !$('motion').checked; $('motion').dispatchEvent(new Event('change')); } }
+  else if (e.key === 'p' || e.key === 'P') { $('show-points').checked = !$('show-points').checked; $('show-points').dispatchEvent(new Event('change')); }
+});
+window.addEventListener('resize', () => requestRender());
+
+// ---------- export ----------
+function exportSize() {
+  const [vw, vh] = videoSize(), sel = $('ex-width').value;
+  return mapSize(sel === 'video' ? vw : Number(sel), state.settings, vw, vh);
+}
+function exportFrames() {
+  const a = Math.max(0, Number($('ex-start').value) || 0), b = Math.min(video.duration || 0, Number($('ex-end').value) || 0);
+  const step = Math.max(1, Math.round(Number($('ex-step').value) || 1));
+  const k0 = frameOf(a, state.fps), k1 = Math.max(k0, Math.ceil(b * state.fps - 1e-6) - 1);
+  const frames = [];
+  for (let k = k0; k <= k1; k += step) frames.push(k);
+  return { a, b, step, frames };
+}
+function updateExportSummary() {
+  const fmtSel = $('ex-format').value, png = fmtSel.startsWith('png') || fmtSel === 'npyu1';
+  $('ex-norm').disabled = png;
+  if (png) $('ex-norm').value = 'max';
+  if (!state.video) { $('ex-summary').textContent = '—'; return; }
+  const [W, H] = exportSize(), { frames, step } = exportFrames();
+  const per = fmtSel === 'npyf4' ? W * H * 4 : fmtSel === 'npyu1' ? W * H : W * H * (fmtSel === 'png16' ? 0.12 : 0.05);
+  const est = frames.length * per;
+  let text = `${frames.length.toLocaleString()} frames at ${W} × ${H}, ${fmt(state.fps / step, 3)} maps per second, about ${bytesText(est)}${fmtSel.startsWith('png') ? ' (PNG size varies)' : ''}.`;
+  if (state.settings.motionComp && state.flow) {
+    const { a, b } = exportFrames(), c = state.flow.coverage(a, b);
+    if (c < 0.98) text += ` Motion flow covers only ${(c * 100).toFixed(0)} % of this range.`;
+  }
+  if (!window.showSaveFilePicker && est > 1.5e9) text += ' This browser builds the file in memory: use Chrome or Edge (writes straight to disk) or a smaller size or range.';
+  $('ex-summary').textContent = text;
+  drawPlayhead();
+}
+['ex-start', 'ex-end', 'ex-step', 'ex-width', 'ex-format', 'ex-norm'].forEach(id => $(id).addEventListener('change', updateExportSummary));
+$('ex-start-here').addEventListener('click', () => { $('ex-start').value = fmt(video.currentTime, 3); updateExportSummary(); });
+$('ex-end-here').addEventListener('click', () => { $('ex-end').value = fmt(video.currentTime, 3); updateExportSummary(); });
+
+function settingsJson(extra = {}) {
+  const s = state.settings, g = state.gaze, [vw, vh] = videoSize();
+  return {
+    tool: 'OverGaze', version: VERSION, created: new Date().toISOString(),
+    video: state.video ? { name: state.video.name, width: vw, height: vh, duration_s: video.duration, fps: state.fps, fps_source: state.fpsSource } : null,
+    gaze: g ? {
+      files: state.files.map(f => (f.folder ? f.folder + '/' : '') + f.name), rows_read: state.gazeAll.n, rows_kept: g.n, kind: g.hasDuration ? 'fixations' : 'samples',
+      observers_used: g.observers.filter((_, i) => state.observerEnabled[i]), conditions_used: g.conditions.filter((_, i) => state.conditionEnabled[i]),
+      column_mapping: state.mapping
+    } : null,
+    saliency: {
+      projection: s.projection, sigma_deg: s.sigmaDeg, kernel_cutoff_sigma: s.truncate, planar_fov_deg: s.projection === 'planar' ? s.planarFovDeg : undefined,
+      pooling_window_s: s.windowSec, pooling_weight: s.kernel, causal: s.causal, weight_by_duration: s.durationWeight,
+      motion_compensation: !!(s.motionComp && state.flow), lon_offset_deg: s.lonOffsetDeg, flip_left_right: s.flipX, flip_up_down: s.flipY,
+      velocity_filter_deg_per_s: s.velocity || 0,
+      frame_rule: 'frame k covers [k/fps, (k+1)/fps); a gaze sample or fixation counts if its time distance to that interval is <= pooling_window_s (0 = active during the frame).',
+      gaussian: s.projection === 'erp' ? 'exp(-theta^2 / (2 sigma^2)), theta = great-circle angle to the gaze point, summed over points' : '2D Gaussian in the image plane, sigma_px = sigma_deg * width / planar_fov_deg'
+    },
+    motion: s.motionComp && state.flow ? { flow_width: state.flow.W, flow_height: state.flow.H, fields: state.flow.size, step_s: state.flow.step, ...state.flowInfo, method_note: 'pyramidal Lucas-Kanade on greyscale frames, wrap-around at the left/right edge for 360° video; each pooled point is moved along the flow from its own time to the frame time' } : null,
+    ...extra
+  };
+}
+$('copy-settings').addEventListener('click', async () => {
+  const text = JSON.stringify(settingsJson(), null, 2);
+  try { await navigator.clipboard.writeText(text); notice('Settings copied to the clipboard.'); }
+  catch { download(new Blob([text], { type: 'application/json' }), 'overgaze_settings.json'); }
+});
+
+function exportBaseName() {
+  const s = state.settings;
+  return `${stem(state.video?.name)}_sal_s${s.sigmaDeg}_w${s.windowSec}${s.causal ? 'past' : ''}${s.motionComp && state.flow ? '_mc' : ''}`;
+}
+
+async function exportMaps() {
+  if (state.exporting) return;
+  if (!state.gaze || !state.video) return;
+  const format = $('ex-format').value, pngFormat = format.startsWith('png');
+  const [W, H] = exportSize(), { a, b, step, frames } = exportFrames();
+  if (!frames.length) { notice('The export range contains no frames.', true); return; }
+  const name = `${exportBaseName()}_${W}x${H}_${pngFormat ? 'png' : 'npy'}.zip`;
+  let writable = null;
+  const parts = [];
+  if (window.showSaveFilePicker) {
+    try {
+      const handle = await window.showSaveFilePicker({ suggestedName: name, types: [{ description: 'ZIP archive', accept: { 'application/zip': ['.zip'] } }] });
+      writable = await handle.createWritable();
+    } catch (e) { if (e.name === 'AbortError') return; writable = null; }
+  }
+  const write = writable ? bytes => writable.write(bytes) : async bytes => { parts.push(bytes); };
+  const normalize = pngFormat || format === 'npyu1' ? 'max' : $('ex-norm').value;
+  const settings = settingsForRender(normalize);
+  const job = { cancel: false };
+  state.exporting = job;
+  $('export-maps').disabled = true; $('export-cancel').hidden = false; $('ex-progress').hidden = false;
+  const bar = $('ex-progress').firstElementChild;
+  const worker = new Worker(new URL('./export-worker.js', import.meta.url), { type: 'module' });
+  const waiters = new Map();
+  let ready;
+  const readyP = new Promise(r => { ready = r; });
+  worker.onmessage = e => { if (e.data.cmd === 'ready') ready(); else { const w = waiters.get(e.data.seq); waiters.delete(e.data.seq); w?.(e.data); } };
+  const g = state.gaze;
+  worker.postMessage({
+    cmd: 'init', W, H, format, fps: state.fps, settings,
+    gaze: { n: g.n, t0: g.t0, t1: g.t1, lon: g.lon, lat: g.lat, obs: g.obs, cond: g.cond, w: g.w, maxDur: g.maxDur },
+    observerEnabled: state.observerEnabled, conditionEnabled: state.conditionEnabled,
+    flow: settings.motionComp && state.flow ? state.flow.serialize() : null
+  });
+  const request = (seq, k) => new Promise(resolve => { waiters.set(seq, resolve); worker.postMessage({ cmd: 'frame', seq, t: frameCentre(k, state.fps) }); });
+  const rows = ['index,frame,time_s,points,raw_max,coverage_pixels,coverage_sphere'];
+  const started = performance.now();
+  try {
+    await readyP;
+    const zip = new ZipWriter(write);
+    const npy = pngFormat ? null : await zip.stream('maps.npy');
+    if (npy) await npy.write(npyHeader(format === 'npyu1' ? '|u1' : '<f4', [frames.length, H, W]));
+    const queue = [];
+    let next = 0;
+    const fill = () => { while (queue.length < 3 && next < frames.length) { queue.push(request(next, frames[next])); next++; } };
+    fill();
+    for (let i = 0; i < frames.length; i++) {
+      if (job.cancel) throw new Error('cancelled');
+      const res = await queue.shift();
+      fill();
+      if (res.cmd === 'error') throw new Error(res.error);
+      const k = frames[i];
+      if (npy) await npy.write(res.bytes); else await zip.add(`maps/${String(k).padStart(6, '0')}.png`, res.bytes);
+      rows.push([i, k, frameCentre(k, state.fps).toFixed(5), res.points, res.max.toPrecision(6), res.cov.pixels.toFixed(6), res.cov.sphere.toFixed(6)].join(','));
+      if (i % 5 === 0 || i === frames.length - 1) {
+        bar.style.width = `${(100 * (i + 1) / frames.length).toFixed(1)}%`;
+        const el = (performance.now() - started) / 1000;
+        setStatus(`Exporting ${i + 1} / ${frames.length} (${fmt(el / (i + 1) * (frames.length - i - 1), 0)} s left)`);
+      }
+    }
+    const meta = settingsJson({
+      export: {
+        format, width: W, height: H, from_s: a, to_s: b, every_nth_frame: step, frames: frames.length, normalize,
+        encoding: format === 'png8' ? 'grey 8-bit PNG, value = round(255 * map), map divided by its frame maximum'
+          : format === 'png16' ? 'grey 16-bit PNG, value = round(65535 * map), map divided by its frame maximum'
+            : format === 'npyu1' ? 'uint8 (T, H, W) = round(255 * map), map divided by its frame maximum'
+              : `float32 (T, H, W), normalisation: ${normalize}`,
+        file_names: pngFormat ? 'maps/<frame index, 6 digits>.png; frame k covers [k/fps, (k+1)/fps)' : 'maps.npy, shape (T, H, W); array index i -> frame given in frames.csv'
+      }
+    });
+    const framesCsv = rows.join('\n') + '\n';
+    if (npy) await npy.end();
+    await zip.add('settings.json', JSON.stringify(meta, null, 2));
+    await zip.add('frames.csv', framesCsv);
+    await zip.finish();
+    if (writable) await writable.close(); else download(new Blob(parts, { type: 'application/zip' }), name);
+    notice(`Exported ${frames.length} maps (${W} × ${H}) in ${fmt((performance.now() - started) / 1000, 1)} s, with settings.json and frames.csv in the ZIP.`);
+    setStatus('Export finished');
+  } catch (e) {
+    if (writable) await writable.abort().catch(() => {});
+    if (e.message === 'cancelled') { setStatus('Export cancelled'); notice('Export cancelled.'); }
+    else { showError(`Export failed: ${e.message}`); setStatus('Export failed'); }
+  } finally {
+    worker.terminate();
+    state.exporting = null;
+    $('export-cancel').hidden = true; $('ex-progress').hidden = true; bar.style.width = '0';
+    updateButtons();
+  }
+}
+$('export-maps').addEventListener('click', exportMaps);
+$('export-cancel').addEventListener('click', () => { if (state.exporting) state.exporting.cancel = true; });
+
+$('export-frame').addEventListener('click', async () => {
+  const [W, H] = exportSize(), [k, t] = currentFrame();
+  const r = renderMap(state.gaze, t, settingsForRender('max'), W, H, renderContext(), {});
+  download(new Blob([await encodeGrayPng(r.map, W, H, $('ex-format').value === 'png16' ? 16 : 8)], { type: 'image/png' }), `${exportBaseName()}_f${String(k).padStart(6, '0')}_${W}x${H}.png`);
+});
+
+function compositeCanvas(maxWidth = 3840) {
+  const [vw, vh] = videoSize(), cw = Math.min(vw, maxWidth), ch = Math.round(cw * vh / vw);
+  const c = document.createElement('canvas'); c.width = cw; c.height = ch;
+  return c;
+}
+function drawComposite(c) {
+  const g = c.getContext('2d');
+  g.drawImage(video, 0, 0, c.width, c.height);
+  if (state.display.mode !== 'off' && state.gaze) { g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high'; g.drawImage(heatCanvas, 0, 0, c.width, c.height); }
+  g.drawImage(marksCanvas, 0, 0, c.width, c.height);
+}
+$('export-snapshot').addEventListener('click', () => {
+  render();
+  const c = compositeCanvas(); drawComposite(c);
+  const [k] = currentFrame();
+  c.toBlob(blob => download(blob, `${exportBaseName()}_overlay_f${String(k).padStart(6, '0')}.png`), 'image/png');
+});
+
+$('export-video').addEventListener('click', async () => {
+  if (state.recording) { state.recording.finish(); return; }
+  const types = ['video/mp4;codecs=avc1.640033', 'video/mp4;codecs=avc1', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+  const mimeType = types.find(t => window.MediaRecorder?.isTypeSupported?.(t));
+  if (!mimeType) { showError('This browser cannot record canvas video (MediaRecorder).'); return; }
+  const { a, b } = exportFrames();
+  const c = compositeCanvas(1920), stream = c.captureStream(Math.min(60, Math.round(state.fps)));
+  const rec = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 12e6 }), chunks = [];
+  rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  const ext = mimeType.startsWith('video/mp4') ? 'mp4' : 'webm';
+  rec.onstop = () => { download(new Blob(chunks, { type: mimeType.split(';')[0] }), `${exportBaseName()}_overlay.${ext}`); setStatus('Recording saved'); };
+  video.pause(); video.playbackRate = 1; $('speed').value = '1';
+  video.currentTime = a;
+  await once(video, 'seeked');
+  render(); drawComposite(c);
+  state.recording = {
+    onFrame(meta) { if (meta.mediaTime >= b) { this.finish(); return; } drawComposite(c); },
+    finish() { if (!state.recording) return; state.recording = null; video.pause(); if (rec.state !== 'inactive') rec.stop(); $('export-video').textContent = 'Record overlay video'; }
+  };
+  $('export-video').textContent = 'Stop recording';
+  setStatus(`Recording ${fmt(a, 2)}–${fmt(b, 2)} s in real time…`);
+  rec.start(500);
+  video.play();
+});
+
+$('export-gaze').addEventListener('click', () => {
+  const s = state.settings, DEG = Math.PI / 180;
+  const csv = gazeToCsv(state.gaze, ([lon, lat]) => {
+    let l = (s.flipX ? -lon : lon) + s.lonOffsetDeg * DEG;
+    l -= 2 * Math.PI * Math.floor((l + Math.PI) / (2 * Math.PI));
+    return [l, s.flipY ? -lat : lat];
+  });
+  download(new Blob([csv], { type: 'text/csv' }), `${stem(state.video?.name || 'gaze')}_gaze_processed.csv`);
+});
+
+function updateButtons() {
+  const hasVideo = !!state.video && !!video.videoWidth, hasGaze = !!state.gaze, readable = hasVideo && !state.video.tainted;
+  $('analyse').disabled = !readable && !state.analysing;
+  $('export-maps').disabled = !(hasVideo && hasGaze) || !!state.exporting;
+  $('export-frame').disabled = !(hasVideo && hasGaze);
+  $('export-snapshot').disabled = !readable;
+  $('export-video').disabled = !readable;
+  $('export-gaze').disabled = !hasGaze;
+}
+
+// ---------- file inputs, drag and drop, sample, URL parameters ----------
+$('choose-video').addEventListener('click', () => $('video-input').click());
+$('empty-video').addEventListener('click', () => $('video-input').click());
+$('video-input').addEventListener('change', e => { if (e.target.files[0]) loadVideoFile(e.target.files[0]); e.target.value = ''; });
+$('load-video-url').addEventListener('click', () => { const u = $('video-url').value.trim(); if (u) loadVideoUrl(u); });
+$('video-url').addEventListener('keydown', e => { if (e.key === 'Enter') $('load-video-url').click(); });
+$('choose-gaze').addEventListener('click', () => $('gaze-input').click());
+$('choose-gaze-folder').addEventListener('click', () => $('gaze-folder-input').click());
+$('gaze-input').addEventListener('change', e => { loadGazeFiles(e.target.files); e.target.value = ''; });
+$('gaze-folder-input').addEventListener('change', e => { loadGazeFiles(e.target.files); e.target.value = ''; });
+$('load-gaze-url').addEventListener('click', () => { const u = $('gaze-url').value.trim(); if (u) loadGazeUrl(u); });
+$('gaze-url').addEventListener('keydown', e => { if (e.key === 'Enter') $('load-gaze-url').click(); });
+
+const drop = $('drop-zone');
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('dragging'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('dragging'));
+drop.addEventListener('drop', async e => {
+  e.preventDefault(); drop.classList.remove('dragging');
+  const files = await droppedFiles(e.dataTransfer);
+  const vid = files.find(f => VIDEO_EXT.test(f.name) || f.type.startsWith('video/'));
+  if (vid) loadVideoFile(vid);
+  const gaze = files.filter(f => GAZE_EXT.test(f.name));
+  if (gaze.length) loadGazeFiles(gaze);
+});
+async function droppedFiles(dt) {
+  const entries = [...dt.items].map(i => i.webkitGetAsEntry?.()).filter(Boolean);
+  if (!entries.length) return [...dt.files];
+  const out = [];
+  const walk = async (entry, path) => {
+    if (entry.isFile) { const f = await new Promise((res, rej) => entry.file(res, rej)); f.relativePath = path + f.name; out.push(f); return; }
+    const reader = entry.createReader();
+    let batch;
+    do { batch = await new Promise((res, rej) => reader.readEntries(res, rej)); for (const child of batch) await walk(child, `${path}${entry.name}/`); } while (batch.length);
+  };
+  for (const entry of entries) await walk(entry, '');
+  return out;
+}
+
+async function loadSample(kind = 'erp') {
+  $('help-menu').open = false;
+  const flat = kind === '2d', video_ = flat ? 'sample_2d.mp4' : 'sample_erp.mp4', gaze = flat ? 'sample_2d_gaze.csv' : 'sample_gaze.csv';
+  try {
+    // Fetched into memory so seeking works whatever the web server supports.
+    const blob = await (await fetch(`./sample/${video_}`)).blob();
+    loadVideoFile(new File([blob], video_, { type: 'video/mp4' }));
+    const res = await fetch(`./sample/${gaze}`);
+    await loadGazeFiles([new File([await res.text()], gaze)]);
+    notice(flat
+      ? 'Sample loaded: an ordinary 2D video, six simulated observers follow a red square (gaze in pixels). The Gaussian is drawn in the image plane; the field of view turns degrees into pixels.'
+      : 'Sample loaded: 8 simulated observers follow a red ball across a scene whose camera pans. Try a ±1 s window with and without motion compensation (analyse motion first).');
+  } catch (e) { notice(`Could not load the sample gaze (${e.message}).`, true); }
+}
+$('load-sample').addEventListener('click', () => loadSample('erp'));
+$('load-sample-2d').addEventListener('click', () => loadSample('2d'));
+$('empty-sample').addEventListener('click', () => loadSample('erp'));
+
+(async function fromQuery() {
+  const q = new URLSearchParams(location.search);
+  const settingsFromQuery = () => {
+    const o = {}, num = (k, to) => { if (q.get(k) != null && Number.isFinite(Number(q.get(k)))) o[to] = Number(q.get(k)); };
+    num('sigma', 'sigmaDeg'); num('window', 'windowSec'); num('velocity', 'velocity'); num('rotate', 'lonOffsetDeg');
+    if (['box', 'triangle', 'gaussian'].includes(q.get('kernel'))) o.kernel = q.get('kernel');
+    if (q.has('past')) o.causal = true;
+    if (Object.keys(o).length) applySettings(o);
+  };
+  if (q.get('sample') != null) { await loadSample(q.get('sample') === '2d' ? '2d' : 'erp'); settingsFromQuery(); return; }
+  if (q.get('video')) loadVideoUrl(q.get('video'));
+  if (q.get('gaze')) {
+    try {
+      const files = [];
+      for (const u of q.get('gaze').split(',').filter(Boolean)) {
+        const res = await fetch(u);
+        if (!res.ok) throw new Error(`HTTP ${res.status} for ${u}`);
+        files.push(new File([await res.text()], stem(u) + (u.match(/\.[a-z]{3,4}(?=$|[?#])/i)?.[0] || '.csv')));
+      }
+      await loadGazeFiles(files);
+    } catch (e) { notice(`Could not fetch the gaze file (${e.message}). The server must allow cross-origin requests (CORS).`, true); }
+  }
+  settingsFromQuery();
+})();
+updateButtons(); updateExportSummary();
+Object.assign(window.overgaze, { render, exportMaps });
