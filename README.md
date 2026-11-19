@@ -41,7 +41,11 @@ Both are recognised on sight; their usual settings are filled in and written in 
 - **VR-EyeTracking** (`Gaze_txt_files/<observer>/<video number>._<date>_ori_0.txt`, rows `frame,<n>,forward,<head x>,<head y>,eye,<gaze x>,<gaze y>`). The label words are dropped, the eye position (`gaze x`, `gaze y`) is used as fractions of the panorama measured **from the bottom-left corner**, frame numbers count from 1, the observer is the `pNNN` folder, and the speed filter is set to 75°/s. Choose the whole `Gaze_txt_files` folder after loading the video `001.mp4`: only the files whose name starts with `001.` are read (6,672 files in the folder, 33 used).
 - **YT360-EyeTracking** (`Fixation_per_user_per_video/<condition>/<video id>-<start>/<observer>.txt`, one row per fixation with `eye_rect_x`, `eye_rect_y` from the top, `start_time`, `end_time`, `duration`). Load the video `<video id>-<start>.webm` and choose the whole `Fixation_per_user_per_video` folder: the files of the folder named like the video are read, the six audio-visual conditions are kept as conditions (all pooled by default, switch them on and off in the list), and when the video is the full download (longer than the 30 s clip) the gaze times are shifted by the start time in the name and the playhead jumps there.
 
+- **YT360 per-frame files** (`Fixation_per_video/<condition>/<video id>-<start>/00000037.txt`, one file per frame with `eye_rect_x`, `eye_rect_y`, no times, no observers) also work: the frame number is taken from the file name. Rows with `nan` (the eye tracker lost the eye) are skipped and counted. Choose a clip folder, not the whole `Fixation_per_video` folder (428,520 files). `Fixation_per_user_per_video` is the better source: it has observers and fixation durations.
+
 The box **Only files whose path contains** overrides the automatic choice of files.
+
+**Something wrong?** **Copy debug details** (in the export panel and the help menu) copies a plain-text report: browser and the video codecs it can play, the video (size, frame rate, errors), every gaze file used with its row count, files that could not be read or had other columns, the column mapping and any mapping error, settings, motion analysis, and every notice and error so far. Paste it into a message or bug report.
 
 ## Settings
 

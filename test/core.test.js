@@ -151,7 +151,7 @@ test('streamed ZIP entries carry a data descriptor and ZIP64 records', async () 
 });
 
 // ---------- real dataset formats ----------
-import { pathMatchesVideo } from '../src/gaze.js';
+import { pathMatchesVideo, FILE_TIME } from '../src/gaze.js';
 import { fpsFromDeltas } from '../src/timing.js';
 
 const VRET = 'frame,1,forward,0.4979051,0.51714,eye,0.25,0.25\nframe,2,forward,0.4974872,0.5171432,eye,0.26,0.26\nframe,3,forward,0.49,0.5,eye,0.27,0.27\n';
@@ -213,4 +213,14 @@ test('frame rate from decoded frame gaps survives whole-millisecond timestamps (
   for (let i = 0; i < 40; i++) { const n = x + 1 / 29.97; t.push(Math.round(n * 1000) / 1000 - Math.round(x * 1000) / 1000); x = n; }
   assert.equal(fpsFromDeltas(t), 29.97);
   assert.equal(fpsFromDeltas(Array(40).fill(0.04)), 25);
+});
+
+test('YT360 per-frame files (Fixation_per_video) take the frame from the file name', () => {
+  const t = parseTable('eye_rect_x,eye_rect_y,head_rect_x,head_rect_y\n0.25,0.5,0.3,0.5\n0.75,0.5,0.7,0.5\n', '00000037.txt');
+  const m = detectMapping(t, { duration: 30 });
+  assert.equal(m.preset, 'yt360frames'); assert.equal(m.time, FILE_TIME); assert.equal(m.timeUnit, 'frame');
+  const g = buildGaze([{ table: t, name: '00000037.txt', folder: 'clip-28', folder2: 'videos-audios' }], m, { fps: 25 });
+  assert.equal(g.n, 2); close(g.t0[0], 37.5 / 25, 1e-9, 'centre of frame 37');
+  assert.equal(g.observers.length, 1, 'no observer ids in these files');
+  assert.throws(() => buildGaze([{ table: t, name: 'frame.txt' }], m, { fps: 25 }), /no number/);
 });

@@ -153,6 +153,8 @@ export function detectMapping(table, context = {}) {
   const ranges = defaultRanges(coord, xs, ys, context);
   const timeUnit = guessTimeUnit(time, ts, context);
   const yt360 = table.columns.includes('eye_rect_x') && table.columns.includes('start_time');
+  // YT360 Fixation_per_video: one file per frame (00000037.txt = frame 37), rows = points of that frame, no observer.
+  const yt360frames = table.columns.includes('eye_rect_x') && !table.columns.includes('start_time');
   const durationUnit = /(^|_)ms$|msec|millis/i.test(duration) ? 'ms' : /(^|_)s$|sec/i.test(duration) ? 's' : timeUnit;
   return {
     time, timeUnit, end, duration, durationUnit, x, y, z: coord === 'vector' ? z : '',
@@ -160,7 +162,8 @@ export function detectMapping(table, context = {}) {
     observerFrom: observer ? 'column' : 'file', observer,
     conditionFrom: condition ? 'column' : 'none', condition,
     weight: '', timeOffset: 0,
-    ...(yt360 ? { preset: 'yt360', x: 'eye_rect_x', y: 'eye_rect_y', time: 'start_time', duration: 'duration', end: '', timeUnit: 's', durationUnit: 's', coord: 'normalized', xLeft: 0, xRight: 1, yTop: 0, yBottom: 1, z: '', conditionFrom: 'folder2' } : {})
+    ...(yt360 ? { preset: 'yt360', x: 'eye_rect_x', y: 'eye_rect_y', time: 'start_time', duration: 'duration', end: '', timeUnit: 's', durationUnit: 's', coord: 'normalized', xLeft: 0, xRight: 1, yTop: 0, yBottom: 1, z: '', conditionFrom: 'folder2' } : {}),
+    ...(yt360frames ? { preset: 'yt360frames', x: 'eye_rect_x', y: 'eye_rect_y', time: FILE_TIME, timeUnit: 'frame', duration: '', end: '', durationUnit: 'frame', coord: 'normalized', xLeft: 0, xRight: 1, yTop: 0, yBottom: 1, z: '', observerFrom: 'none', observer: '', conditionFrom: 'folder2' } : {})
   };
 }
 
@@ -240,6 +243,9 @@ function guessTimeUnit(name, values, context) {
   return 's';
 }
 
+/** Mapping value meaning "the time is the number in the file name" (one file per frame). */
+export const FILE_TIME = '(number in file name)';
+
 const UNIT = { s: 1, ms: 1e-3, us: 1e-6 };
 /** Seconds of a time value. Frame numbers give the frame CENTRE (frame k covers [k/fps, (k+1)/fps)); 'frame1' counts from 1. */
 export function toSeconds(value, unit, fps = 30) {
@@ -268,11 +274,13 @@ export function buildGaze(files, mapping, context = {}) {
     const col = name => (name ? cols.indexOf(name) : -1);
     const it = col(mapping.time), ix = col(mapping.x), iy = col(mapping.y), iz = col(mapping.z);
     const ie = col(mapping.end), id = col(mapping.duration), io = col(mapping.observer), ic = col(mapping.condition), iw = col(mapping.weight);
-    if (it < 0 || ix < 0 || iy < 0) throw new Error(`${file.name}: time, x and y columns are required (missing ${[it < 0 && 'time', ix < 0 && 'x', iy < 0 && 'y'].filter(Boolean).join(', ')}).`);
+    const fileTime = mapping.time === FILE_TIME ? (m => m ? Number(m[0]) : NaN)(file.name.match(/\d+(?=\.[^.]*$|$)/)) : NaN;
+    if (mapping.time === FILE_TIME && !Number.isFinite(fileTime)) throw new Error(`${file.name}: the time is taken from the file name, but the name holds no number.`);
+    if ((it < 0 && mapping.time !== FILE_TIME) || ix < 0 || iy < 0) throw new Error(`${file.name}: time, x and y columns are required (missing ${[it < 0 && 'time', ix < 0 && 'x', iy < 0 && 'y'].filter(Boolean).join(', ')}).`);
     if (mapping.coord === 'vector' && iz < 0) throw new Error(`${file.name}: 3D direction needs a z column.`);
     const stem = file.name.replace(/\.[^.]+$/, '');
     for (const row of file.table.rows) {
-      const t = Number(row[it]), x = Number(row[ix]), y = Number(row[iy]);
+      const t = mapping.time === FILE_TIME ? fileTime : Number(row[it]), x = Number(row[ix]), y = Number(row[iy]);
       if (!Number.isFinite(t) || !Number.isFinite(x) || !Number.isFinite(y)) { skipped++; continue; }
       const t0 = secs(t, mapping.timeUnit) + (Number(mapping.timeOffset) || 0);
       let t1 = t0;

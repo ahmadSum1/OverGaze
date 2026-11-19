@@ -26,6 +26,9 @@
           <strong>Getting started</strong>
           <p>Load a video and one or more gaze files (CSV, TSV, JSON or ARFF), or try the synthetic 360° sample: a red ball moving across a panning scene, watched by 8 simulated observers.</p>
           <button id="load-sample" class="button button-outline" type="button">Load 360° sample</button> <button id="load-sample-2d" class="button button-outline" type="button">Load 2D sample</button>
+          <strong>Something wrong?</strong>
+          <p>Copy what is loaded and every message so far, and paste it into a message.</p>
+          <button id="copy-debug-help" class="button button-outline" type="button">Copy debug details</button>
           <strong>Keyboard</strong>
           <p><span class="keyboard">Space</span> play / pause · <span class="keyboard">←</span><span class="keyboard">→</span> one frame · <span class="keyboard">Shift</span> + arrows one second · <span class="keyboard">M</span> motion compensation · <span class="keyboard">P</span> gaze points</p>
         </div>
@@ -221,6 +224,7 @@
           <button id="export-video" class="button button-outline small" type="button" disabled>Record overlay video</button>
           <button id="export-gaze" class="button button-outline small" type="button" disabled>Processed gaze (CSV)</button>
           <button id="copy-settings" class="button button-outline small" type="button">Copy settings (JSON)</button>
+          <button id="copy-debug" class="button button-outline small" type="button" title="What is loaded, the column mapping and every message and error so far, as text">Copy debug details</button>
         </div>
       </div>
       <div class="inspector-tip"><span>✳</span><div><strong>Coverage</strong><p>Share of the frame at or above 0.1 of the frame maximum, per pixel and per sphere area. Use it to compare map density between settings or datasets.</p></div></div>

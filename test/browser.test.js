@@ -24,6 +24,8 @@ test('sample loads without console errors, draws the heatmap and reports coverag
     assert.equal(await b.eval('overgaze.state.gaze.n'), 169);
     const alpha = await b.eval('(()=>{const c=document.querySelector("#heat-canvas");const d=c.getContext("2d").getImageData(0,0,c.width,c.height).data;let m=0;for(let i=3;i<d.length;i+=4)m=Math.max(m,d[i]);return m})()');
     assert.ok(alpha > 100, `heatmap is drawn (max alpha ${alpha})`);
+    const report = await b.eval('overgaze.debugReport()');
+    for (const want of ['sample_erp.mp4', 'sample_gaze.csv: 169 rows', 'SETTINGS', 'MESSAGES AND ERRORS']) assert.ok(report.includes(want), `debug report mentions ${want}`);
   } finally { b.close(); server.close(); }
 });
 

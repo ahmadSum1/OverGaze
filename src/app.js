@@ -1,4 +1,4 @@
-import { buildGaze, columnValues, defaultRanges, detectMapping, gazeToCsv, parseTable, pathMatchesVideo, velocityFilter } from './gaze.js';
+import { FILE_TIME, buildGaze, columnValues, defaultRanges, detectMapping, gazeToCsv, parseTable, pathMatchesVideo, velocityFilter } from './gaze.js';
 import { DEFAULTS, coverage, frameCentre, frameOf, mapSize, renderMap } from './saliency.js';
 import { FlowStore, toGray } from './flow.js';
 import { ZipWriter, encodeGrayPng, npyHeader } from './export.js';
@@ -22,7 +22,7 @@ const state = {
 
 // Handle for the tests and the console: mapAt(frame, width) renders the same map the export writes (raw, unnormalised).
 window.overgaze = {
-  state, applySettings: o => applySettings(o),
+  state, debugReport: () => debugReport(), applySettings: o => applySettings(o),
   mapAt(k, width = 512, normalize = 'none') {
     const [vw, vh] = videoSize(), [W, H] = mapSize(width, state.settings, vw, vh);
     const r = renderMap(state.gaze, frameCentre(k, state.fps), settingsForRender(normalize), W, H, renderContext(), {});
@@ -36,11 +36,16 @@ const pct = x => Number.isFinite(x) ? `${(100 * x).toFixed(2)} %` : '—';
 const bytesText = b => b > 1e9 ? `${(b / 1e9).toFixed(2)} GB` : b > 1e6 ? `${(b / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1e3))} kB`;
 const obsColor = i => `hsl(${(i * 137.508) % 360} 80% 62%)`;
 function setStatus(text) { $('status').textContent = text; }
+const debugLog = [];
+function remember(kind, text) { if (text) { debugLog.push(`${new Date().toISOString().slice(11, 23)} ${kind}: ${text}`); if (debugLog.length > 200) debugLog.shift(); } }
+window.addEventListener('error', e => remember('exception', `${e.message} (${(e.filename || '').split('/').pop()}:${e.lineno})`));
+window.addEventListener('unhandledrejection', e => remember('unhandled promise', String(e.reason?.stack || e.reason)));
 function notice(text, warn = false) {
+  remember(warn ? 'warning' : 'notice', text);
   const n = $('notice');
   n.hidden = !text; n.textContent = text || ''; n.classList.toggle('warn', warn);
 }
-function showError(text) { const e = $('error-message'); e.hidden = !text; e.textContent = text || ''; }
+function showError(text) { remember('error', text); const e = $('error-message'); e.hidden = !text; e.textContent = text || ''; }
 function download(blob, name) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = name;
@@ -371,6 +376,7 @@ densityCanvas.addEventListener('click', e => {
 
 // ---------- gaze loading ----------
 async function loadGazeFiles(list) {
+  const chosen = list.length;   // a FileList empties when its input is reset
   let files = [...list].filter(f => GAZE_EXT.test(f.name) && !f.name.startsWith('.'));
   if (!files.length) { notice('No gaze files found (expected .csv, .tsv, .txt, .json, .arff or .dat).', true); return; }
   const relOf = f => f.webkitRelativePath || f.relativePath || f.name;
@@ -387,11 +393,17 @@ async function loadGazeFiles(list) {
   if (!files.length) { notice(`${note} Nothing left to load.`, true); return; }
   setStatus(`Reading ${files.length} gaze file(s)…`);
   const parsed = [], failed = [];
-  for (const f of files) {
-    try {
-      const parts = relOf(f).split('/');
-      parsed.push({ name: f.name, folder: parts.length > 1 ? parts[parts.length - 2] : '', folder2: parts.length > 2 ? parts[parts.length - 3] : '', table: parseTable(await f.text(), f.name) });
-    } catch (e) { failed.push(`${f.name}: ${e.message}`); }
+  // read in batches: thousands of small files (one per frame) are slow one by one
+  for (let i = 0; i < files.length; i += 64) {
+    const texts = await Promise.all(files.slice(i, i + 64).map(f => f.text().then(t => [f, t], e => [f, null, e])));
+    for (const [f, text, err] of texts) {
+      try {
+        if (err) throw err;
+        const parts = relOf(f).split('/');
+        parsed.push({ name: f.name, path: relOf(f), folder: parts.length > 1 ? parts[parts.length - 2] : '', folder2: parts.length > 2 ? parts[parts.length - 3] : '', table: parseTable(text, f.name) });
+      } catch (e) { failed.push(`${relOf(f)}: ${e.message}`); }
+    }
+    if (files.length > 200) setStatus(`Reading gaze files… ${Math.min(files.length, i + 64)} / ${files.length}`);
   }
   setStatus(state.video ? 'Video ready' : 'Gaze loaded');
   if (!parsed.length) { notice(`Could not read the gaze files. ${failed.slice(0, 3).join(' ')}`, true); return; }
@@ -400,6 +412,7 @@ async function loadGazeFiles(list) {
   const same = parsed.filter(p => p.table.columns.join('|') === ref);
   const other = parsed.filter(p => p.table.columns.join('|') !== ref);
   state.files = same;
+  state.loadReport = { chosen, read: files.length, filter: note, failed, otherColumns: other.map(o => ({ path: o.path, columns: o.table.columns })) };
   state.mapping = detectMapping(same[0].table, { duration: video.duration || 60, width: video.videoWidth || 0, height: video.videoHeight || 0 });
   if (same.length === 1 && state.mapping.observerFrom === 'file') state.mapping.observerFrom = 'none';
   const folders = new Set(same.map(f => f.folder));
@@ -422,13 +435,17 @@ function applyDatasetDefaults(m) {
     applySettings({ velocity: 75 });
     msg.push('Recognised VR-EyeTracking gaze (eye position, y from the bottom, one sample per frame): speed filter set to 75°/s.');
   }
-  if (m.preset === 'yt360') {
+  if (m.preset === 'yt360frames') {
+    applySettings({ velocity: 0 });
+    msg.push('Recognised YT360-EyeTracking per-frame files (Fixation_per_video): the frame number comes from the file name and observers are not known, so all points of a condition count as one group. Fixation_per_user_per_video has observers and fixation durations and is the better choice.');
+  }
+  if (m.preset === 'yt360' || m.preset === 'yt360frames') {
     const start = /-(\d+)$/.exec(state.video ? stem(state.video.name) : '');
     if (start && video.duration > 35) {
       m.timeOffset = Number(start[1]);
       if (Number.isFinite(video.duration)) video.currentTime = m.timeOffset;
-      msg.push(`Recognised YT360-EyeTracking fixations. The video is the full download, so gaze times are shifted by the clip start (${m.timeOffset} s).`);
-    } else msg.push('Recognised YT360-EyeTracking fixations (times in seconds from the clip start).');
+      msg.push(`The video is the full download, so gaze times are shifted by the clip start (${m.timeOffset} s).`);
+    } else if (m.preset === 'yt360') msg.push('Recognised YT360-EyeTracking fixations (times in seconds from the clip start).');
   }
   return msg.join(' ');
 }
@@ -447,7 +464,7 @@ function populateMappingForm() {
   document.querySelectorAll('select[data-map]').forEach(sel => {
     const key = sel.dataset.map;
     if (['time', 'x', 'y', 'z', 'end', 'duration', 'observer', 'condition', 'weight'].includes(key)) {
-      sel.innerHTML = `<option value="">— none —</option>` + cols.map(c => `<option>${escapeHtml(c)}</option>`).join('');
+      sel.innerHTML = `<option value="">— none —</option>` + (key === 'time' ? `<option>${FILE_TIME}</option>` : '') + cols.map(c => `<option>${escapeHtml(c)}</option>`).join('');
     }
     sel.value = m[key] ?? '';
   });
@@ -496,7 +513,7 @@ function rebuildGaze() {
     state.conditionEnabled = Uint8Array.from(state.gaze.conditions, c => prevCond?.has(c) ? prevCond.get(c) : 1);
   } catch (e) {
     state.gaze = null;
-    $('mapping-error').hidden = false; $('mapping-error').textContent = e.message;
+    $('mapping-error').hidden = false; $('mapping-error').textContent = e.message; remember('mapping error', e.message);
   }
   renderGroups(); updateGazeSummary(); drawDensity(); updateSubtitle(); updateButtons(); updateExportSummary(); requestRender();
 }
@@ -506,7 +523,7 @@ function updateGazeSummary() {
   if (!g) { el.textContent = state.files.length ? 'Check the column mapping.' : 'No gaze loaded. One file per observer, or one file with an observer column.'; return; }
   const kind = g.hasDuration ? 'fixations' : 'samples';
   let text = `${state.files.length} file(s), ${g.n.toLocaleString()} ${kind}, ${g.observers.length} observer(s), ${g.conditions.length} condition(s), ${fmt(g.tMin, 2)}–${fmt(g.tMax, 2)} s.`;
-  if (state.gazeAll && state.gazeAll.skipped) text += ` ${state.gazeAll.skipped} unreadable row(s) skipped.`;
+  if (state.gazeAll && state.gazeAll.skipped) text += ` ${state.gazeAll.skipped} row(s) skipped (no valid time or position, e.g. nan where the eye tracker lost the eye).`;
   if (g.filtered) text += ` Velocity filter removed ${g.filtered.toLocaleString()}.`;
   el.textContent = text;
   if (video.duration && (g.tMax > video.duration * 1.5 + 1 || g.tMax < video.duration * 0.2)) notice(`Gaze times run to ${fmt(g.tMax, 1)} s but the video lasts ${fmt(video.duration, 1)} s: check the time unit or the time offset in the column mapping.`, true);
@@ -751,6 +768,48 @@ $('copy-settings').addEventListener('click', async () => {
   try { await navigator.clipboard.writeText(text); notice('Settings copied to the clipboard.'); }
   catch { download(new Blob([text], { type: 'application/json' }), 'overgaze_settings.json'); }
 });
+
+/** Plain-text report of what is loaded and what went wrong, to paste into a bug report or a chat. */
+function debugReport() {
+  const v = state.video, g = state.gaze, r = state.loadReport, [vw, vh] = videoSize(), L = [];
+  const can = t => document.createElement('video').canPlayType(t) || 'no';
+  L.push(`OverGaze ${VERSION} debug report, ${new Date().toISOString()}`, `page: ${location.href}`, `browser: ${navigator.userAgent}`,
+    `can play: H.264 ${can('video/mp4; codecs="avc1.42E01E"')}, VP9 ${can('video/webm; codecs="vp9"')}, AV1 ${can('video/mp4; codecs="av01.0.05M.08"')}, H.265 ${can('video/mp4; codecs="hvc1.1.6.L93.B0"')}`, '');
+  L.push('VIDEO');
+  if (!v) L.push('  none');
+  else L.push(`  ${v.name}${v.size ? ' (' + bytesText(v.size) + ')' : ''}${v.remote ? ' link: ' + v.src : ''}`, `  ${vw} × ${vh}, ${fmt(video.duration, 2)} s, ${fmt(state.fps, 3)} fps (${state.fpsSource}), ready state ${video.readyState}, pixels ${v.tainted ? 'not readable (no CORS)' : 'readable'}`,
+    `  playhead ${fmt(video.currentTime, 3)} s${video.error ? `, error ${video.error.code}: ${video.error.message}` : ''}`);
+  L.push('', 'GAZE');
+  if (!state.files.length) L.push('  none');
+  else {
+    if (r) L.push(`  files chosen ${r.chosen}, read ${r.read}${r.filter ? ' — ' + r.filter : ''}`);
+    L.push(`  used ${state.files.length} file(s) with columns: ${state.files[0].table.columns.join(', ')}${state.files[0].table.preset ? ' (format ' + state.files[0].table.preset + ')' : ''}`);
+    const shown = state.files.slice(0, 40);
+    for (const f of shown) L.push(`    ${f.path || f.name}: ${f.table.rows.length} rows`);
+    if (state.files.length > shown.length) L.push(`    … and ${state.files.length - shown.length} more`);
+    if (r?.failed.length) { L.push(`  could not read ${r.failed.length}:`); r.failed.slice(0, 20).forEach(x => L.push('    ' + x)); }
+    if (r?.otherColumns.length) { L.push(`  skipped ${r.otherColumns.length} with other columns:`); r.otherColumns.slice(0, 10).forEach(o => L.push(`    ${o.path}: ${o.columns.join(', ')}`)); }
+    L.push(`  mapping: ${JSON.stringify(state.mapping)}`);
+    if (!$('mapping-error').hidden) L.push(`  MAPPING ERROR: ${$('mapping-error').textContent}`);
+    if (g) L.push(`  ${state.gazeAll.n} rows read, ${g.n} kept${g.filtered ? ` (${g.filtered} dropped by the speed filter)` : ''}, ${state.gazeAll.skipped || 0} rows without valid time or position, ${g.observers.length} observers, ${g.conditions.length} conditions (${g.conditions.join(', ')}), time ${fmt(g.tMin, 3)}–${fmt(g.tMax, 3)} s`);
+  }
+  L.push('', 'SETTINGS', '  ' + JSON.stringify(state.settings));
+  L.push('', 'MOTION', `  ${state.flow ? $('flow-status').textContent : 'not analysed'}${state.flowInfo ? ' ' + JSON.stringify(state.flowInfo) : ''}`);
+  if (state.last?.result) L.push('', 'CURRENT FRAME', `  frame ${state.last.k}, ${state.last.result.points.n} points, map ${state.last.W} × ${state.last.H}, coverage ${$('ro-coverage').textContent}`);
+  L.push('', 'ON SCREEN', `  status: ${$('status').textContent}`);
+  if (!$('error-message').hidden) L.push(`  error: ${$('error-message').textContent}`);
+  if (!$('notice').hidden) L.push(`  notice: ${$('notice').textContent}`);
+  L.push('', 'MESSAGES AND ERRORS (oldest first)', ...(debugLog.length ? debugLog.map(x => '  ' + x) : ['  none']));
+  return L.join('\n') + '\n';
+}
+const copyDebug = async () => {
+  $('help-menu').open = false;
+  const text = debugReport();
+  try { await navigator.clipboard.writeText(text); notice('Debug details copied to the clipboard: paste them into a message or a bug report.'); }
+  catch { download(new Blob([text], { type: 'text/plain' }), 'overgaze_debug.txt'); }
+};
+$('copy-debug').addEventListener('click', copyDebug);
+$('copy-debug-help').addEventListener('click', copyDebug);
 
 function exportBaseName() {
   const s = state.settings;
