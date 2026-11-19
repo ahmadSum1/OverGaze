@@ -107,7 +107,7 @@ video.addEventListener('error', () => {
   showError(`The video could not be loaded (${video.error?.message || 'unsupported format or unreachable link'}). ` + (noH264
     ? 'This browser cannot play H.264 (MP4) video at all; built-in browsers such as the one in VS Code lack it. Open the page in Chrome, Edge or Firefox, or convert the video to VP9: ffmpeg -i in.mp4 -c:v libvpx-vp9 -crf 32 -b:v 0 out.webm'
     : (v.size > 2e9
-      ? `The file is large (${bytesText(v.size)}); built-in browsers such as the one in VS Code cannot open files this big, Chrome can. Or cut out the part you need without re-encoding: ffmpeg -ss <start s> -t 30 -i in.webm -c copy clip.webm`
+      ? `The file is large (${bytesText(v.size)}); built-in browsers such as the one in VS Code cannot open files this big, Chrome can. Or cut out the part you need (re-encoded, so it starts exactly at the start time): ffmpeg -ss <start s> -i in.webm -t 30 -vf scale=1920:960 -c:v libvpx-vp9 -crf 32 -b:v 0 clip.webm`
       : 'Browsers play H.264 / VP9 / AV1 in MP4 or WebM; H.265 works only in some browsers.')));
   setStatus('Video failed');
 });
