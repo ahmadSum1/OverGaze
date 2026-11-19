@@ -103,10 +103,12 @@ video.addEventListener('error', () => {
     return;
   }
   // Some embedded browsers (the VS Code browser, other Electron apps, Chromium builds) ship without H.264.
-  const noH264 = !document.createElement('video').canPlayType('video/mp4; codecs="avc1.42E01E"');
+  const noH264 = /\.(mp4|m4v|mov)$/i.test(v.name) && !document.createElement('video').canPlayType('video/mp4; codecs="avc1.42E01E"');
   showError(`The video could not be loaded (${video.error?.message || 'unsupported format or unreachable link'}). ` + (noH264
     ? 'This browser cannot play H.264 (MP4) video at all; built-in browsers such as the one in VS Code lack it. Open the page in Chrome, Edge or Firefox, or convert the video to VP9: ffmpeg -i in.mp4 -c:v libvpx-vp9 -crf 32 -b:v 0 out.webm'
-    : 'Browsers play H.264 / VP9 / AV1 in MP4 or WebM; H.265 works only in some browsers.'));
+    : (v.size > 2e9
+      ? `The file is large (${bytesText(v.size)}); built-in browsers such as the one in VS Code cannot open files this big, Chrome can. Or cut out the part you need without re-encoding: ffmpeg -ss <start s> -t 30 -i in.webm -c copy clip.webm`
+      : 'Browsers play H.264 / VP9 / AV1 in MP4 or WebM; H.265 works only in some browsers.')));
   setStatus('Video failed');
 });
 
