@@ -293,7 +293,7 @@ video.addEventListener('pause', () => { $('play').textContent = '▶'; $('play')
 video.addEventListener('seeked', () => { state.mediaTime = video.currentTime; requestRender(); });
 video.addEventListener('ended', () => { state.recording?.finish(); });
 
-function togglePlay() { if (!state.video) return; if (video.paused) video.play().catch(e => showError(String(e.message || e))); else video.pause(); }
+function togglePlay() { if (!state.video) return; if (state.ref) state.ref.resume = false; if (video.paused) video.play().catch(e => showError(String(e.message || e))); else video.pause(); }
 function stepFrames(n) {
   if (!state.video) return;
   video.pause();
@@ -404,15 +404,29 @@ function referenceAt(k, W, H) {
       // while playing, show the newest frame that is ready, so the reference keeps moving with the video
       if (!R.shown || R.shown.W !== W || Math.abs(j - R.want) < Math.abs(R.shown.idx - R.want)) R.shown = { idx: j, map, W, H };
     }).catch(e => { R.error = `frame ${j}: ${e.message}`; remember('reference error', R.error); })
-      .finally(() => { R.pending.delete(j); if (state.ref === R && (video.paused || j === R.want)) requestRender(); });
+      .finally(() => { R.pending.delete(j); if (state.ref === R && (video.paused || j === R.want)) { if (j === R.want) resumeAfterReference(); requestRender(); } });
   };
   R.want = idx;
   const key = `${idx}:${W}x${H}`;
+  const P = R.pre;
+  if (P && P.done[idx]) {                       // prepared in the background after loading: no disk read needed
+    let map = R.cache.get(key);
+    if (!map) {
+      const n = P.W * P.H, q = P.data.subarray(idx * n, (idx + 1) * n), f = new Float32Array(n), m = P.max[idx] / 255;
+      for (let i = 0; i < n; i++) f[i] = q[i] * m;
+      map = resample(f, P.W, P.H, W, H);
+      R.cache.set(key, map);
+      while (R.cache.size > 32) R.cache.delete(R.cache.keys().next().value);
+    }
+    R.status = ''; R.shown = { idx, map, W, H };
+    return { idx, map, fresh: true };
+  }
   // read ahead while playing (a few frames, so slow disks are not swamped)
   if (!video.paused && R.N > 1) for (let j = idx + 1; j <= idx + 6 && R.pending.size < 4; j++) load(j);
   if (R.cache.has(key)) { const map = R.cache.get(key); R.status = ''; R.shown = { idx, map, W, H }; return { idx, map, fresh: true }; }
   load(idx);
   R.status = `loading reference frame ${idx}…`;
+  if (R.hold && !video.paused) { video.pause(); R.resume = true; }   // keep video and reference together
   // meanwhile keep showing the nearest frame that was ready (marked as not current)
   return R.shown && R.shown.W === W && R.shown.H === H ? { idx: R.shown.idx, map: R.shown.map, fresh: false } : null;
 }
@@ -420,7 +434,8 @@ function updateReferenceReadout(ref, result) {
   const R = state.ref;
   $('ro-ref-card').hidden = !R;
   if (!R) return;
-  $('ref-status').textContent = R.error ? `Error: ${R.error}` : R.status || (ref ? `Showing reference frame ${ref.idx}.` : '');
+  $('ref-status').textContent = (R.error ? `Error: ${R.error}. ` : '') + (R.prepStatus ? R.prepStatus[0].toUpperCase() + R.prepStatus.slice(1) + '. ' : '') + (R.status || (ref ? `Showing reference frame ${ref.idx}.` : ''));
+  if (arguments[2]) return;   // progress only
   if (!ref) { $('ro-ref').textContent = '—'; $('ro-ref-detail').textContent = R.status || 'no reference for this frame'; return; }
   const thr = state.settings.coverageThreshold;
   if (result && result.max > 0) {
@@ -447,12 +462,52 @@ async function loadReference(files) {
     if (R.kind === 'bin') msgs.push('Salient360 maps: frame offset +1 (bin frame 0 is empty, bin frame k belongs to video frame k − 1).');
     if (R.N > 1 && vFrames && Math.abs(R.N - vFrames) > 2) msgs.push(`It has ${R.N} frames and the video about ${vFrames}: set “Ref. frames per video frame” (e.g. ${fmt(R.N / vFrames, 3)}) or the offset if they do not line up.`);
     notice(msgs.join(' '), R.N > 1 && vFrames && Math.abs(R.N - vFrames) > 2);
+    R.hold = $('ref-hold').checked;
     requestRender();
+    prepareReference(R);
   } catch (e) { notice(`Could not open the reference: ${e.message}`, true); }
+}
+function resumeAfterReference() { const R = state.ref; if (R?.resume) { R.resume = false; video.play().catch(() => {}); } }
+
+/**
+ * Read every reference frame once, right after loading, and keep it small in memory (at most 512 × 256, one byte
+ * per value plus the frame maximum: 79 MB for 600 frames), starting at the playhead. Playback then never waits for
+ * the disk. Frames not prepared yet are still read on demand.
+ */
+async function prepareReference(R) {
+  const PW = Math.min(R.W, 512), PH = Math.max(1, Math.round(PW * R.H / R.W)), n = PW * PH;
+  if (R.N * n > 800e6) { R.prepStatus = 'too many frames to keep in memory: read on demand'; return; }
+  const P = R.pre = { W: PW, H: PH, data: new Uint8Array(R.N * n), max: new Float32Array(R.N), done: new Uint8Array(R.N), count: 0 };
+  const start = Math.max(0, Math.min(R.N - 1, R.want ?? 0)), order = [];
+  for (let i = 0; i < R.N; i++) order.push((start + i) % R.N);
+  const t0 = performance.now();
+  let next = 0;
+  const worker = async () => {
+    while (next < order.length && state.ref === R) {
+      const j = order[next++];
+      if (P.done[j]) continue;
+      try {
+        const small = resample(await R.frame(j), R.W, R.H, PW, PH);
+        let mx = 0;
+        for (const v of small) if (v > mx) mx = v;
+        const q = P.data.subarray(j * n, (j + 1) * n), k = mx > 0 ? 255 / mx : 0;
+        for (let i = 0; i < n; i++) q[i] = Math.round(small[i] * k);
+        P.max[j] = mx; P.done[j] = 1; P.count++;
+      } catch (e) { R.error = `frame ${j}: ${e.message}`; }
+      if (P.count % 10 === 0 || P.count === R.N) {
+        const el = (performance.now() - t0) / 1000;
+        R.prepStatus = P.count === R.N ? `all ${R.N} frames ready in memory (${fmt(el, 1)} s)` : `preparing frames: ${P.count} / ${R.N} (${fmt(el / P.count * (R.N - P.count), 0)} s left)`;
+        if (video.paused) requestRender(); else updateReferenceReadout(null, null, true);
+        if (j === R.want) resumeAfterReference();
+      }
+    }
+  };
+  await Promise.all([worker(), worker()]);
 }
 $('choose-ref').addEventListener('click', () => $('ref-input').click());
 $('ref-input').addEventListener('change', e => { if (e.target.files.length) loadReference([...e.target.files]); e.target.value = ''; });
 $('clear-ref').addEventListener('click', () => { state.ref = null; syncLayerChips(); $('ref-name').textContent = $('ref-size').textContent = '—'; $('ref-status').textContent = 'No reference loaded.'; $('clear-ref').disabled = true; requestRender(); });
+$('ref-hold').addEventListener('change', e => { if (state.ref) state.ref.hold = e.target.checked; if (!e.target.checked) resumeAfterReference(); });
 $('ref-offset').addEventListener('change', e => { if (state.ref) { state.ref.offset = Math.round(Number(e.target.value) || 0); requestRender(); } });
 $('ref-scale').addEventListener('change', e => { if (state.ref) { state.ref.scale = Math.max(0.001, Number(e.target.value) || 1); requestRender(); } });
 $('ref-heat').addEventListener('change', e => { state.refShow.heat = e.target.checked; syncLayerChips(); requestRender(); });

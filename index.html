@@ -110,6 +110,7 @@
           <label>Frame offset<input id="ref-offset" type="number" step="1" value="0" title="reference frame = video frame × rate + offset"></label>
           <label>Ref. frames per video frame<input id="ref-scale" type="number" step="0.01" min="0.01" value="1"></label>
         </div>
+        <label class="view-switch" title="While playing, pause until the reference frame for the current video frame has been read, then go on: video and reference stay together, playback may slow down"><span>Hold the video for the reference</span><input id="ref-hold" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
         <label class="view-switch"><span>Reference heatmap</span><input id="ref-heat" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
         <label class="view-switch"><span>Outlines (reference white, ours lime)</span><input id="ref-outline" type="checkbox" role="switch" checked><span class="switch-track" aria-hidden="true"></span></label>
         <label class="input-label" for="ref-colormap">REFERENCE COLOURS</label>

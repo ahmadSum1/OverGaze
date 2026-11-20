@@ -144,6 +144,7 @@ test('gaze files add up, observers can be removed, messages can be dismissed, a 
     // reference with the default 0 offset: video frame 0 ↔ reference frame 0; then offset −45 puts frame 0 at video frame 45 (1.5 s)
     await b.setFiles('#ref-input', [join(dir, 'ref.npy')]);
     await b.waitFor('!!overgaze.state.ref', 5000);
+    await b.waitFor('/ready in memory/.test(document.querySelector("#ref-status").textContent)', 10000, 'reference frames prepared after loading');
     await b.eval('document.querySelector("#video").currentTime = 0.01; 1');
     await b.waitFor('document.querySelector("#ro-ref-detail").textContent.includes("reference frame 0")', 10000, 'reference readout');
     await b.eval('overgaze.applySettings({ sigmaDeg: 5.6 }); document.querySelector("#ref-offset").value = "-45"; document.querySelector("#ref-offset").dispatchEvent(new Event("change")); document.querySelector("#video").currentTime = 1.51; 1');
