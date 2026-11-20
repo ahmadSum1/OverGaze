@@ -217,6 +217,8 @@ test('a click on the video plays and pauses it', opts, async () => {
     assert.equal(await b.eval('document.querySelector("#video").paused'), false, 'playing after one click');
     await clickStage();
     assert.equal(await b.eval('document.querySelector("#video").paused'), true, 'paused after the second');
+    await b.click('#loop');
+    assert.equal(await b.eval('document.querySelector("#video").loop'), true, '⟳ repeats the video');
   } finally { b.close(); server.close(); }
 });
 

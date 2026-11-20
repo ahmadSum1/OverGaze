@@ -169,7 +169,8 @@ video.addEventListener('loadedmetadata', () => {
   $('stage').style.setProperty('--aspect', String(state.view ? 16 / 9 : vw / vh));
   $('empty-state').hidden = true; $('stage-wrap').hidden = false;
   if (!state.projectionTouched) {
-    const erp = Math.abs(vw / vh - 2) < 0.02 || converting();
+    // 2:1, or close to it: many 360° videos are full-sphere equirectangular with a few rows more or less (3840 × 2048)
+    const erp = (vw / vh > 1.86 && vw / vh < 2.15) || converting();
     state.settings.projection = erp ? 'erp' : 'planar';
     $('projection').value = state.settings.projection; $('fov-row').hidden = erp;
   }
@@ -392,18 +393,27 @@ function referenceAt(k, W, H) {
   const R = state.ref;
   const idx = R.N === 1 ? 0 : Math.round(k * R.scale) + R.offset;
   if (idx < 0 || idx >= R.N) { R.status = `video frame ${k} → reference frame ${idx}: outside 0–${R.N - 1}`; return null; }
+  const load = j => {
+    const key = `${j}:${W}x${H}`;
+    if (j < 0 || j >= R.N || R.cache.has(key) || R.pending.has(j)) return;
+    R.pending.add(j);
+    R.frame(j).then(raw => {
+      const map = resample(raw, R.W, R.H, W, H);
+      R.cache.set(key, map);
+      while (R.cache.size > 32) R.cache.delete(R.cache.keys().next().value);
+      // while playing, show the newest frame that is ready, so the reference keeps moving with the video
+      if (!R.shown || R.shown.W !== W || Math.abs(j - R.want) < Math.abs(R.shown.idx - R.want)) R.shown = { idx: j, map, W, H };
+    }).catch(e => { R.error = `frame ${j}: ${e.message}`; remember('reference error', R.error); })
+      .finally(() => { R.pending.delete(j); if (state.ref === R && (video.paused || j === R.want)) requestRender(); });
+  };
+  R.want = idx;
   const key = `${idx}:${W}x${H}`;
+  // read ahead while playing (a few frames, so slow disks are not swamped)
+  if (!video.paused && R.N > 1) for (let j = idx + 1; j <= idx + 6 && R.pending.size < 4; j++) load(j);
   if (R.cache.has(key)) { const map = R.cache.get(key); R.status = ''; R.shown = { idx, map, W, H }; return { idx, map, fresh: true }; }
-  if (!R.pending.has(idx)) {
-    R.pending.add(idx);
-    R.frame(idx).then(raw => {
-      R.cache.set(key, resample(raw, R.W, R.H, W, H));
-      while (R.cache.size > 24) R.cache.delete(R.cache.keys().next().value);
-    }).catch(e => { R.error = `frame ${idx}: ${e.message}`; remember('reference error', R.error); })
-      .finally(() => { R.pending.delete(idx); if (state.ref === R) requestRender(); });
-  }
+  load(idx);
   R.status = `loading reference frame ${idx}…`;
-  // meanwhile keep showing the last frame that was ready (marked as not current)
+  // meanwhile keep showing the nearest frame that was ready (marked as not current)
   return R.shown && R.shown.W === W && R.shown.H === H ? { idx: R.shown.idx, map: R.shown.map, fresh: false } : null;
 }
 function updateReferenceReadout(ref, result) {
@@ -433,6 +443,7 @@ async function loadReference(files) {
     $('ref-offset').value = String(R.offset); $('ref-scale').value = '1'; $('clear-ref').disabled = false; syncLayerChips();
     const vFrames = video.duration ? Math.round(video.duration * state.fps) : 0;
     const msgs = [`Reference loaded: ${R.name}.`];
+    if (R.kind === 'bin' && !state.projectionTouched && state.settings.projection !== 'erp') { state.settings.projection = 'erp'; $('projection').value = 'erp'; $('fov-row').hidden = true; updateSubtitle(); msgs.push('Projection set to 360° (Salient360 maps are equirectangular).'); }
     if (R.kind === 'bin') msgs.push('Salient360 maps: frame offset +1 (bin frame 0 is empty, bin frame k belongs to video frame k − 1).');
     if (R.N > 1 && vFrames && Math.abs(R.N - vFrames) > 2) msgs.push(`It has ${R.N} frames and the video about ${vFrames}: set “Ref. frames per video frame” (e.g. ${fmt(R.N / vFrames, 3)}) or the offset if they do not line up.`);
     notice(msgs.join(' '), R.N > 1 && vFrames && Math.abs(R.N - vFrames) > 2);
@@ -471,6 +482,7 @@ function set360(on) {
     catch (e) { showError(`The 360° view needs WebGL2: ${e.message}`); return; }
     state.viewSource ||= document.createElement('canvas');
   } else if (!on) state.view = null;
+  if (on && state.settings.projection !== 'erp') notice('The gaze is set to “2D video”: the 360° view treats the frame as equirectangular anyway. Set Projection to 360° in the settings if the video is a 360° video.', true);
   glCanvas.hidden = !on; $('view360-bar').hidden = !on; $('view-360').classList.toggle('active', on);
   const [vw, vh] = videoSize();
   $('stage').style.setProperty('--aspect', String(on ? 16 / 9 : vw / vh));
@@ -951,6 +963,7 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'ArrowRight') { e.preventDefault(); e.shiftKey ? seekSeconds(1) : stepFrames(1); }
   else if (e.key === 'ArrowLeft') { e.preventDefault(); e.shiftKey ? seekSeconds(-1) : stepFrames(-1); }
   else if (e.key === 'm' || e.key === 'M') { if (!$('motion').disabled) { $('motion').checked = !$('motion').checked; $('motion').dispatchEvent(new Event('change')); } }
+  else if (e.key === 'l' || e.key === 'L') $('loop').click();
   else if (e.key === 'p' || e.key === 'P') { $('show-points').checked = !$('show-points').checked; $('show-points').dispatchEvent(new Event('change')); }
 });
 window.addEventListener('resize', () => requestRender());
@@ -1230,7 +1243,7 @@ function updateButtons() {
   $('export-snapshot').disabled = !readable;
   $('export-video').disabled = !readable;
   $('export-gaze').disabled = !hasGaze;
-  $('view-360').disabled = !readable || state.settings.projection !== 'erp';
+  $('view-360').disabled = !readable;
   if (state.view && $('view-360').disabled) set360(false);
 }
 
@@ -1348,3 +1361,9 @@ $('cyl-hfov').addEventListener('change', e => setLayoutOption({ hfov: Math.max(1
     timer = setTimeout(togglePlay, state.view ? 250 : 0);
   });
 }
+
+// ⟳: start again at the end of the video
+$('loop').addEventListener('click', () => {
+  video.loop = !video.loop;
+  $('loop').classList.toggle('active', video.loop); $('loop').setAttribute('aria-pressed', String(video.loop));
+});
