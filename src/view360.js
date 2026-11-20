@@ -4,7 +4,7 @@
 //  - View360 shows an equirectangular frame from inside the sphere: perspective (like the 360° players of YouTube
 //    or VLC), little planet (stereographic) or fisheye (equidistant). These views follow egjs-view360 (NAVER,
 //    MIT licence, https://github.com/naver/egjs-view360); the shaders are our own.
-import { glslLayout, layoutIndex } from './projections.js';
+import { DEFAULT_OPTIONS, faceTables, glslLayout, layoutIndex } from './projections.js';
 
 const VS = `#version 300 es
 in vec2 p; out vec2 ndc;
@@ -35,18 +35,19 @@ function webgl(canvas) {
 }
 
 export class LayoutConverter {
-  constructor(canvas = document.createElement('canvas')) {
-    this.canvas = canvas; this.gl = webgl(canvas);
+  constructor(canvas = document.createElement('canvas'), opts = DEFAULT_OPTIONS) {
+    this.canvas = canvas; this.gl = webgl(canvas); this.opts = { ...DEFAULT_OPTIONS, ...opts };
     this.p = program(this.gl, `#version 300 es
 precision highp float;
 in vec2 ndc; out vec4 color;
-uniform sampler2D src; uniform int lay; uniform vec2 size;  // ("layout" is a reserved word in GLSL)
-${glslLayout()}
+uniform sampler2D src; uniform int lay; uniform vec2 size; uniform float hfov;  // ("layout" is a reserved word in GLSL)
+${glslLayout(faceTables(this.opts))}
 void main() {
   vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);                 // output pixel, v down
   float lon = (uv.x - 0.5) * 2.0 * PI, lat = (0.5 - uv.y) * PI;
   vec3 d = vec3(cos(lat) * sin(lon), sin(lat), cos(lat) * cos(lon));
-  color = texture(src, layoutUV(lay, d, size));
+  vec2 p = layoutUV(lay, d, size, hfov);
+  color = p.x < 0.0 ? vec4(0.0, 0.0, 0.0, 1.0) : texture(src, p);
 }`);
   }
   /** Draw `source` (video, image, canvas) of the given layout as an equirectangular frame of W × H. */
@@ -58,6 +59,7 @@ void main() {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
     gl.uniform1i(this.p.u('lay'), layoutIndex(layout));
     gl.uniform2f(this.p.u('size'), srcW, srcH);
+    gl.uniform1f(this.p.u('hfov'), Math.max(1, Math.min(360, this.opts.hfov || 360)) * Math.PI / 180);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     return c;
   }

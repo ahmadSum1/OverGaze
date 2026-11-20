@@ -47,6 +47,11 @@
         <div class="url-row"><input id="video-url" type="url" placeholder="https://…/clip.mp4"><button id="load-video-url" class="button button-outline" type="button">Open</button></div>
         <label class="input-label" for="layout">VIDEO LAYOUT</label>
         <div class="select-wrap"><select id="layout"></select></div>
+        <div id="cube-options" class="grid2" hidden>
+          <label title="Faces tile by tile from the top left: R L U D F B = right, left, up, down, front, back">Face order<input id="face-order" type="text" value="RLUDFB" maxlength="6" autocomplete="off"></label>
+          <label class="view-switch"><span>Mirror faces</span><input id="face-mirror" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
+        </div>
+        <div id="cyl-options" class="setting-row" hidden><label for="cyl-hfov">Horizontal coverage (°)</label><input id="cyl-hfov" class="num" type="number" min="1" max="360" step="1" value="360"></div>
         <dl class="details compact"><div><dt>File</dt><dd id="video-name">—</dd></div><div><dt>Size</dt><dd id="video-size">—</dd></div><div><dt>Duration</dt><dd id="video-duration">—</dd></div><div><dt>Pixels</dt><dd id="video-access">—</dd></div></dl>
       </section>
 

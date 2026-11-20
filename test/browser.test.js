@@ -168,8 +168,10 @@ test('gaze files add up, observers can be removed, messages can be dismissed, a 
 
 test('a cubemap or equi-angular cubemap video is unfolded to the same equirectangular frame', { skip: opts.skip || (spawnSync('ffmpeg', ['-version']).status !== 0 && 'ffmpeg not available') }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'overgaze-layout-'));
-  for (const [name, out] of [['eac', 'w=768:h=512'], ['c3x2', 'w=768:h=512']]) {
-    const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-i', join(ROOT, 'sample', 'sample_erp.mp4'), '-t', '3', '-vf', `v360=input=e:output=${name}:${out}`, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', join(dir, `${name}.mp4`)]);
+  const vfov = 2 * Math.atan(Math.PI * 384 / 768) * 180 / Math.PI;   // a full 360° cylinder of 768 × 384
+  const cases = [['eac', 'eac:w=768:h=512'], ['c3x2', 'c3x2:w=768:h=512'], ['c3x2-lrdubf', 'c3x2:w=768:h=512:out_forder=lrdubf:out_frot=000000'], ['cyl', `cylindrical:w=768:h=384:h_fov=360:v_fov=${vfov}`]];
+  for (const [name, out] of cases) {
+    const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-i', join(ROOT, 'sample', 'sample_erp.mp4'), '-t', '3', '-vf', `v360=input=e:output=${out}`, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', join(dir, `${name}.mp4`)]);
     assert.equal(r.status, 0, String(r.stderr));
   }
   const { server, url } = await serve(), b = await launch();
@@ -181,18 +183,39 @@ test('a cubemap or equi-angular cubemap video is unfolded to the same equirectan
     await b.waitFor('document.querySelector("#video").readyState >= 2', 20000);
     await b.eval('document.querySelector("#video").currentTime = 1.5; new Promise(r => document.querySelector("#video").addEventListener("seeked", r, { once: true }))');
     const ref = await b.eval(grey('document.querySelector("#video")'));
-    for (const name of ['eac', 'c3x2']) {
+    for (const [name] of cases) {
       await b.setFiles('#video-input', [join(dir, `${name}.mp4`)]);
       await b.waitFor(`document.querySelector("#video-name").textContent === "${name}.mp4" && document.querySelector("#video").readyState >= 2`, 20000);
-      if (name === 'c3x2') await b.eval(`document.querySelector('#layout').value = 'c3x2'; document.querySelector('#layout').dispatchEvent(new Event('change')); 1`);
+      const set = (id, v) => b.eval(`document.querySelector('#${id}').value = '${v}'; document.querySelector('#${id}').dispatchEvent(new Event('change')); 1`);
+      if (name.startsWith('c3x2')) { await set('layout', 'c3x2'); await set('face-order', name === 'c3x2' ? 'RLUDFB' : 'LRDUBF'); }
+      else if (name === 'cyl') await set('layout', 'cyl');   // 2:1 like equirectangular, so it is chosen by hand
       else assert.equal(await b.eval('overgaze.state.layout'), 'eac', 'a 3:2 video is taken as equi-angular cubemap');
       await b.eval('document.querySelector("#video").currentTime = 1.5; new Promise(r => document.querySelector("#video").addEventListener("seeked", r, { once: true }))');
       await new Promise(r => setTimeout(r, 500));
       await b.eval('overgaze.render(); 1');
-      const c = cc(ref, await b.eval(grey('document.querySelector("#erp-canvas")')));
+      let got = await b.eval(grey('document.querySelector("#erp-canvas")')), want = ref;
+      if (name === 'cyl') { want = ref.slice(28 * 256, 100 * 256); got = got.slice(28 * 256, 100 * 256); }   // rows inside the cylinder
+      const c = cc(want, got);
       if (!(c > 0.9)) console.log(await b.eval('document.querySelector("#error-text").textContent'), b.logs);
       assert.ok(c > 0.9, `${name} unfolded frame correlates ${c.toFixed(3)} with the original`);
       assert.deepEqual(await b.eval('overgaze.videoSize ? 1 : 1'), 1);
     }
+  } finally { b.close(); server.close(); }
+});
+
+test('a click on the video plays and pauses it', opts, async () => {
+  const { server, url } = await serve(), b = await launch();
+  try {
+    await b.goto(url + '?sample');
+    await b.waitFor('!!overgaze.state.gaze && document.querySelector("#video").readyState >= 2', 20000);
+    const clickStage = async () => {
+      const r = await b.eval('(()=>{const r=document.querySelector("#stage").getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2]})()');
+      for (const type of ['mousePressed', 'mouseReleased']) await b.send('Input.dispatchMouseEvent', { type, x: r[0], y: r[1], button: 'left', clickCount: 1 });
+      await new Promise(r => setTimeout(r, 400));
+    };
+    await clickStage();
+    assert.equal(await b.eval('document.querySelector("#video").paused'), false, 'playing after one click');
+    await clickStage();
+    assert.equal(await b.eval('document.querySelector("#video").paused'), true, 'paused after the second');
   } finally { b.close(); server.close(); }
 });

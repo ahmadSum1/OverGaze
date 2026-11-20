@@ -5,7 +5,7 @@ import { ZipWriter, encodeGrayPng, npyHeader } from './export.js';
 import { fpsFromDeltas } from './timing.js';
 import { compareMaps, openReference, resample } from './reference.js';
 import { LayoutConverter, VIEW_MODES, View360 } from './view360.js';
-import { LAYOUTS, erpSize } from './projections.js';
+import { CUBE_LAYOUTS, DEFAULT_OPTIONS, LAYOUTS, erpSize, faceTables } from './projections.js';
 import { COLORMAPS, colorize, cssGradient } from './colormap.js';
 
 const VERSION = '1.0.0';
@@ -22,7 +22,7 @@ const state = {
   flow: null, flowInfo: null, analysing: null, exporting: null, recording: null,
   work: {}, last: null, renderQueued: false, projectionTouched: false, density: null,
   ref: null, refShow: { heat: false, outline: true }, showGaze: true, removedObservers: new Set(), view: null,
-  layout: 'erp', layoutTouched: false, converter: null
+  layout: 'erp', layoutTouched: false, layoutOpts: { ...DEFAULT_OPTIONS }, converter: null
 };
 
 // Handle for the tests and the console: mapAt(frame, width) renders the same map the export writes (raw, unnormalised).
@@ -60,27 +60,35 @@ function download(blob, name) {
 function stem(name) { return (name || 'video').replace(/[?#].*$/, '').split('/').pop().replace(/\.[^.]+$/, '') || 'video'; }
 function rawVideoSize() { return [video.videoWidth || 2, video.videoHeight || 1]; }
 /** Size of the (equirectangular) frame the overlay works on: the video itself, or what its layout unfolds to. */
-function videoSize() { const [w, h] = rawVideoSize(); return erpSize(state.layout, w, h); }
+function videoSize() { const [w, h] = rawVideoSize(); return erpSize(state.layout, w, h, state.layoutOpts); }
 const converting = () => state.layout !== 'erp';
+const grabConverter = () => new LayoutConverter(undefined, state.layoutOpts);
 /** The picture under the overlay: the video, or its layout converted to equirectangular (drawn on demand). */
 function frameImage() {
   if (!converting()) return video;
   const [w, h] = rawVideoSize(), [W, H] = videoSize(), s = Math.min(1, 2048 / W);
   try {
-    state.converter ||= new LayoutConverter($('erp-canvas'));
+    const key = JSON.stringify(state.layoutOpts);
+    if (!state.converter || state.converterKey !== key) {
+      // a new shader for other face options; the canvas keeps one WebGL context, so swap in a fresh canvas
+      const old = $('erp-canvas'), c = old.cloneNode(false);
+      if (state.converter) { old.replaceWith(c); }
+      state.converter = new LayoutConverter(state.converter ? c : old, state.layoutOpts); state.converterKey = key;
+    }
     return state.converter.convert(video, state.layout, w, h, Math.round(W * s), Math.round(H * s));
   } catch (e) { showError(`Converting the ${LAYOUTS[state.layout].label} video needs WebGL2 and readable pixels: ${e.message}`); return video; }
 }
 /** Guess the layout from the frame shape: only exact shapes, since 16:9 360° videos are usually stretched equirectangular. */
 function guessLayout(w, h) {
   const r = w / h, near = x => Math.abs(r - x) / x < 0.01;
-  return near(2) ? 'erp' : near(1) ? 'erp-tb' : near(4) ? 'erp-lr' : near(1.5) ? 'eac' : near(6) ? 'c6x1' : near(1 / 6) ? 'c1x6' : 'erp';
+  return near(2) ? 'erp' : near(1) ? 'erp-tb' : near(4) ? 'erp-lr' : near(1.5) ? 'eac' : near(6) ? 'c6x1' : near(1 / 6) ? 'c1x6' : r > 2.2 ? 'cyl' : 'erp';
 }
 function setLayout(layout, touched = false) {
   state.layout = LAYOUTS[layout] ? layout : 'erp';
   if (touched) state.layoutTouched = true;
   $('layout').value = state.layout;
   $('erp-canvas').hidden = !converting();
+  $('cube-options').hidden = !CUBE_LAYOUTS.includes(state.layout); $('cyl-options').hidden = state.layout !== 'cyl';
   const [vw, vh] = videoSize();
   $('stage').style.setProperty('--aspect', String(state.view ? 16 / 9 : vw / vh));
   if (state.flow) { state.flow = null; state.flowInfo = null; updateFlowUi(); }
@@ -821,7 +829,7 @@ async function analyseMotion() {
     pending.set(id, msg => { if (msg.error) failures++; else store.add(tA, tB, msg.u, msg.v); resolve(); });
     worker.postMessage({ id, a: A, b: B, W, H, wrap });
   });
-  const conv = converting() ? new LayoutConverter() : null, [rw, rh] = rawVideoSize(), layout = state.layout;
+  const conv = converting() ? grabConverter() : null, [rw, rh] = rawVideoSize(), layout = state.layout;
   const grab = () => { g.drawImage(conv ? conv.convert(probe, layout, rw, rh, W, H) : probe, 0, 0, W, H); return toGray(g.getImageData(0, 0, W, H).data, W, H); };
   const started = performance.now();
   try {
@@ -1313,3 +1321,27 @@ $('layout').innerHTML = Object.entries(LAYOUTS).map(([k, v]) => `<option value="
 $('layout').addEventListener('change', e => setLayout(e.target.value, true));
 $('view360-mode').innerHTML = Object.entries(VIEW_MODES).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join('');
 $('view360-mode').addEventListener('change', e => { if (state.view) { state.view.setMode(e.target.value); $('view360-follow').checked = false; redraw360(); } });
+
+// layout options: cube face order and mirroring (like egjs-view360's cubemapOrder / cubemapFlipX), cylinder coverage
+function setLayoutOption(o) {
+  const next = { ...state.layoutOpts, ...o };
+  try { faceTables(next); } catch (e) { notice(e.message, true); $('face-order').value = state.layoutOpts.order.toUpperCase(); return; }
+  state.layoutOpts = next;
+  setLayout(state.layout, true);
+}
+$('face-order').addEventListener('change', e => setLayoutOption({ order: e.target.value.trim().toLowerCase() }));
+$('face-mirror').addEventListener('change', e => setLayoutOption({ mirror: e.target.checked }));
+$('cyl-hfov').addEventListener('change', e => setLayoutOption({ hfov: Math.max(1, Math.min(360, Number(e.target.value) || 360)) }));
+
+// click on the video: play / pause (in the 360° view only a click, not a drag)
+{
+  let down = null;
+  $('stage').addEventListener('pointerdown', e => { down = { x: e.clientX, y: e.clientY }; });
+  let timer = 0;
+  $('stage').addEventListener('click', e => {
+    if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) return;
+    clearTimeout(timer);
+    if (e.detail > 1) return;   // a double-click resets the 360° view and does not play / pause
+    timer = setTimeout(togglePlay, state.view ? 250 : 0);
+  });
+}

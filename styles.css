@@ -101,3 +101,4 @@ input[type=range]{accent-color:var(--lime);width:100%}
 .view360-bar select{background:#20232b;color:#e5e8e1;border:1px solid #393d47;border-radius:4px;font-size:11px;padding:2px 4px}
 .view360-bar select{min-width:120px;flex:none}
 .view360-bar select{width:auto!important}
+.stage{cursor:pointer}

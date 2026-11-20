@@ -75,8 +75,11 @@ Check: Salient360 `1_PortoRiverside` with both eyes' fixations, σ 2°, window 0
 | Cubemap 3 × 2 | faces right, left, up / down, front, back | — (3:2 is taken as the next one) |
 | Cube strip 6 × 1 and 1 × 6 | same face order in one row or column | 6:1, 1:6 |
 | Equi-angular cubemap 3 × 2 (YouTube) | left, front, right / down, back, up (bottom row turned), 2-pixel padding | 3:2 |
+| Cylindrical panorama | picture wrapped on a cylinder: across = angle, up = height on the cylinder (tan of the elevation); black above and below | wider than 2.2:1 (except 4:1 and 6:1) |
 
-The cube layouts follow ffmpeg's `v360` filter (default face order and rotation), which is how such files are usually made: unfolding ffmpeg's cubemap and equi-angular cubemap output gives exactly ffmpeg's own equirectangular result (`tools/fit_cube_faces.mjs` fits the face table; a browser test checks both against the original). A YouTube equi-angular cubemap download (YT360 `AnfsPA5FXh4-1215`, 3840 × 2160) unfolds without seams, with the fixations on the people and the crossing. Choose the layout by hand when the shape is ambiguous: 16:9 files can be stretched equirectangular (most YT360 clips) or equi-angular cubemap (that one).
+For the cube layouts, **Face order** gives the faces tile by tile from the top left (R L U D F B = right, left, up, down, front, back; default RLUDFB) and **Mirror faces** mirrors each face, like `cubemapOrder` and `cubemapFlipX` in egjs-view360. For a cylindrical panorama, **Horizontal coverage** (default 360°) says how far around the picture reaches; the vertical field of view follows from the shape, 2·atan(π·height / width) for a full turn (115° for 2:1).
+
+The cube layouts follow ffmpeg's `v360` filter (default face order and rotation), which is how such files are usually made: unfolding ffmpeg's cubemap and equi-angular cubemap output gives exactly ffmpeg's own equirectangular result (`tools/fit_cube_faces.mjs` fits the face table). The cylindrical mapping matches ffmpeg's `cylindrical` output to within rounding (mean error 0.2 of 255). A browser test makes cubemap (default and LRDUBF face order), equi-angular cubemap and cylindrical videos of the sample with ffmpeg and checks that each unfolds to the original frame. A YouTube equi-angular cubemap download (YT360 `AnfsPA5FXh4-1215`, 3840 × 2160) unfolds without seams, with the fixations on the people and the crossing. Choose the layout by hand when the shape is ambiguous: 16:9 files can be stretched equirectangular (most YT360 clips) or equi-angular cubemap (that one).
 
 **360° view** (above the video, for 360° videos whose pixels can be read) shows the frame from inside the sphere with the heatmap, outlines and gaze points on it:
 
@@ -86,7 +89,7 @@ The cube layouts follow ffmpeg's `v360` filter (default face order and rotation)
 
 Drag to look around, use the wheel to zoom, double-click to reset. **follow the gaze** turns the view towards the maximum of the current map, smoothly while playing. Exports stay equirectangular.
 
-The list of layouts and views is modelled on [egjs-view360](https://github.com/naver/egjs-view360) by NAVER (MIT licence): its equirectangular, stereo equirectangular, cubemap, cube strip and equi-angular cubemap projections and its little-planet view. OverGaze does not include its code; the shaders are written for OverGaze.
+The list of layouts and views is modelled on [egjs-view360](https://github.com/naver/egjs-view360) by NAVER (MIT licence): its equirectangular, stereo equirectangular, cubemap (with face order and mirroring), cube strip, equi-angular cubemap and cylindrical projections and its little-planet view. OverGaze does not include its code; the shaders are written for OverGaze.
 
 ![360° view](docs/screenshots/11-360-view.png)
 
@@ -151,9 +154,9 @@ The readout under the video shows the points in the window, the observers that c
 
 ![2D video](docs/screenshots/09-2d-video.png)
 
-## Keyboard
+## Keyboard and mouse
 
-Space: play / pause. Left / right: one frame. Shift + left / right: one second. M: motion compensation on / off. P: gaze points on / off.
+Click on the video: play / pause (in the 360° view a click, not a drag; a double-click resets the view). Space: play / pause. Left / right: one frame. Shift + left / right: one second. M: motion compensation on / off. P: gaze points on / off.
 
 ## Development
 
