@@ -6,7 +6,8 @@ const STOPS = {
   magma: ['#000004', '#2c115f', '#721f81', '#b73779', '#f1605d', '#feb078', '#fcfdbf'],
   viridis: ['#440154', '#414487', '#2a788e', '#22a884', '#7ad151', '#fde725'],
   hot: ['#000000', '#800000', '#ff0000', '#ff8000', '#ffff00', '#ffffff'],
-  gray: ['#000000', '#ffffff']
+  gray: ['#000000', '#ffffff'],
+  ice: ['#04121f', '#0b3c5d', '#1170a8', '#2fb3e8', '#9fe6ff', '#ffffff']
 };
 
 export const COLORMAPS = Object.keys(STOPS);

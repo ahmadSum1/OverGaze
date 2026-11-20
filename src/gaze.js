@@ -290,7 +290,7 @@ export function buildGaze(files, mapping, context = {}) {
     if (mapping.time === FILE_TIME && !Number.isFinite(fileTime)) throw new Error(`${file.name}: the time is taken from the file name, but the name holds no number.`);
     if ((it < 0 && mapping.time !== FILE_TIME) || ix < 0 || iy < 0) throw new Error(`${file.name}: time, x and y columns are required (missing ${[it < 0 && 'time', ix < 0 && 'x', iy < 0 && 'y'].filter(Boolean).join(', ')}).`);
     if (mapping.coord === 'vector' && iz < 0) throw new Error(`${file.name}: 3D direction needs a z column.`);
-    const stem = file.name.replace(/\.[^.]+$/, '');
+    const stem = file.label || file.name.replace(/\.[^.]+$/, '');
     let run = 0, prevCounter = Infinity;
     for (const row of file.table.rows) {
       if (mapping.observerFrom === 'restart' && io >= 0) {   // a counter column that starts again for each observer

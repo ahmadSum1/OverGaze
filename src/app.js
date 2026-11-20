@@ -4,13 +4,14 @@ import { FlowStore, toGray } from './flow.js';
 import { ZipWriter, encodeGrayPng, npyHeader } from './export.js';
 import { fpsFromDeltas } from './timing.js';
 import { compareMaps, openReference, resample } from './reference.js';
-import { View360, wrap180 } from './view360.js';
+import { LayoutConverter, VIEW_MODES, View360 } from './view360.js';
+import { LAYOUTS, erpSize } from './projections.js';
 import { COLORMAPS, colorize, cssGradient } from './colormap.js';
 
 const VERSION = '1.0.0';
 const $ = id => document.getElementById(id);
 const video = $('video');
-const heatCanvas = $('heat-canvas'), marksCanvas = $('marks-canvas'), densityCanvas = $('density-canvas');
+const refCanvas = $('ref-canvas'), heatCanvas = $('heat-canvas'), marksCanvas = $('marks-canvas'), densityCanvas = $('density-canvas');
 const GAZE_EXT = /\.(csv|tsv|txt|json|arff|dat)$/i, VIDEO_EXT = /\.(mp4|m4v|webm|mkv|mov|ogv)$/i;
 
 const state = {
@@ -20,7 +21,8 @@ const state = {
   display: { mode: 'heat', colormap: 'jet', opacity: 0.65, gamma: 1, mapWidth: 512, showPoints: true, showFlow: false },
   flow: null, flowInfo: null, analysing: null, exporting: null, recording: null,
   work: {}, last: null, renderQueued: false, projectionTouched: false, density: null,
-  ref: null, refDisplay: 'contours', removedObservers: new Set(), view: null
+  ref: null, refShow: { heat: false, outline: true }, showGaze: true, removedObservers: new Set(), view: null,
+  layout: 'erp', layoutTouched: false, converter: null
 };
 
 // Handle for the tests and the console: mapAt(frame, width) renders the same map the export writes (raw, unnormalised).
@@ -56,7 +58,34 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 60000);
 }
 function stem(name) { return (name || 'video').replace(/[?#].*$/, '').split('/').pop().replace(/\.[^.]+$/, '') || 'video'; }
-function videoSize() { return [video.videoWidth || 2, video.videoHeight || 1]; }
+function rawVideoSize() { return [video.videoWidth || 2, video.videoHeight || 1]; }
+/** Size of the (equirectangular) frame the overlay works on: the video itself, or what its layout unfolds to. */
+function videoSize() { const [w, h] = rawVideoSize(); return erpSize(state.layout, w, h); }
+const converting = () => state.layout !== 'erp';
+/** The picture under the overlay: the video, or its layout converted to equirectangular (drawn on demand). */
+function frameImage() {
+  if (!converting()) return video;
+  const [w, h] = rawVideoSize(), [W, H] = videoSize(), s = Math.min(1, 2048 / W);
+  try {
+    state.converter ||= new LayoutConverter($('erp-canvas'));
+    return state.converter.convert(video, state.layout, w, h, Math.round(W * s), Math.round(H * s));
+  } catch (e) { showError(`Converting the ${LAYOUTS[state.layout].label} video needs WebGL2 and readable pixels: ${e.message}`); return video; }
+}
+/** Guess the layout from the frame shape: only exact shapes, since 16:9 360° videos are usually stretched equirectangular. */
+function guessLayout(w, h) {
+  const r = w / h, near = x => Math.abs(r - x) / x < 0.01;
+  return near(2) ? 'erp' : near(1) ? 'erp-tb' : near(4) ? 'erp-lr' : near(1.5) ? 'eac' : near(6) ? 'c6x1' : near(1 / 6) ? 'c1x6' : 'erp';
+}
+function setLayout(layout, touched = false) {
+  state.layout = LAYOUTS[layout] ? layout : 'erp';
+  if (touched) state.layoutTouched = true;
+  $('layout').value = state.layout;
+  $('erp-canvas').hidden = !converting();
+  const [vw, vh] = videoSize();
+  $('stage').style.setProperty('--aspect', String(state.view ? 16 / 9 : vw / vh));
+  if (state.flow) { state.flow = null; state.flowInfo = null; updateFlowUi(); }
+  updateSubtitle(); updateButtons(); requestRender();
+}
 function settingsForRender(normalize = 'max') { return { ...state.settings, normalize }; }
 function renderContext() {
   return { fps: state.fps, tol: 0.5 / state.fps, observerEnabled: state.observerEnabled, conditionEnabled: state.conditionEnabled, flow: state.settings.motionComp ? state.flow : null };
@@ -122,16 +151,22 @@ video.addEventListener('error', () => {
 });
 
 video.addEventListener('loadedmetadata', () => {
+  const [rw, rh] = rawVideoSize();
+  if (!state.layoutTouched) {
+    const guess = guessLayout(rw, rh);
+    if (guess !== state.layout) setLayout(guess);
+    if (guess !== 'erp') notice(`The video is ${rw} × ${rh}, so it was taken as “${LAYOUTS[guess].label}”. Change “Video layout” if that is wrong${guess === 'eac' ? ' (3 × 2 frames are either a cubemap or YouTube’s equi-angular cubemap)' : ''}.`, true);
+  }
   const [vw, vh] = videoSize();
   $('stage').style.setProperty('--aspect', String(state.view ? 16 / 9 : vw / vh));
   $('empty-state').hidden = true; $('stage-wrap').hidden = false;
   if (!state.projectionTouched) {
-    const erp = Math.abs(vw / vh - 2) < 0.02;
+    const erp = Math.abs(vw / vh - 2) < 0.02 || converting();
     state.settings.projection = erp ? 'erp' : 'planar';
     $('projection').value = state.settings.projection; $('fov-row').hidden = erp;
   }
   $('video-name').textContent = state.video.name; $('video-name').title = state.video.name;
-  $('video-size').textContent = `${vw} × ${vh}${state.video.size ? ' · ' + bytesText(state.video.size) : ''}`;
+  $('video-size').textContent = `${rw} × ${rh}${state.video.size ? ' · ' + bytesText(state.video.size) : ''}`;
   $('video-duration').textContent = `${fmt(video.duration, 2)} s`;
   $('viewer-name').textContent = state.video.name;
   $('scrubber').max = String(video.duration || 1);
@@ -164,7 +199,7 @@ video.addEventListener('loadeddata', () => {
 
 function updateSubtitle() {
   const parts = [];
-  if (state.video) { const [vw, vh] = videoSize(); parts.push(`${vw}×${vh}`, `${fmt(state.fps, 3)} fps (${state.fpsSource})`, state.settings.projection === 'erp' ? '360° ERP' : '2D'); }
+  if (state.video) { const [vw, vh] = rawVideoSize(); parts.push(`${vw}×${vh}${converting() ? ' ' + state.layout : ''}`, `${fmt(state.fps, 3)} fps (${state.fpsSource})`, state.settings.projection === 'erp' ? '360° ERP' : '2D'); }
   if (state.gaze) parts.push(`${state.gaze.n.toLocaleString()} gaze rows, ${state.gaze.observers.length} observers`);
   $('viewer-subtitle').textContent = parts.join(' · ') || 'Load a video and gaze data';
 }
@@ -271,6 +306,7 @@ function render() {
   const [k, t] = currentFrame();
   $('time-label').textContent = `${fmt(video.paused ? video.currentTime : state.mediaTime, 3)} s · frame ${k}`;
   if (document.activeElement !== $('scrubber')) $('scrubber').value = String(video.paused ? video.currentTime : state.mediaTime);
+  if (converting()) frameImage();
   const [vw, vh] = videoSize();
   const [W, H] = mapSize(state.display.mapWidth, state.settings, vw, vh);
   if (heatCanvas.width !== W || heatCanvas.height !== H) { heatCanvas.width = W; heatCanvas.height = H; }
@@ -296,14 +332,19 @@ function render() {
     $('readout-badge').hidden = false;
     $('readout-badge').textContent = `σ ${state.settings.sigmaDeg}° · ±${state.settings.windowSec} s${state.settings.causal ? ' past' : ''}${state.settings.motionComp && state.flow ? ' · motion-comp.' : ''}`;
   }
-  if (state.display.mode !== 'off') {
-    if (ref && state.refDisplay === 'heat') colorize(normalised(ref.map), img.data, colorOpts);
-    else if (result) colorize(result.map, img.data, colorOpts);
-  }
-  const outlines = state.ref && state.refDisplay === 'contours';
-  if (outlines && ref) outline(ref.map, W, H, thr, [255, 255, 255], img.data, state.settings.projection === 'erp');
-  if ((outlines || state.display.outline) && result && result.max > 0) outline(result.map, W, H, thr, [200, 245, 106], img.data, state.settings.projection === 'erp');
+  const wrapX = state.settings.projection === 'erp', refOutline = !!(state.ref && state.refShow.outline);
+  if (state.showGaze && state.display.mode !== 'off' && result) colorize(result.map, img.data, colorOpts);
+  if (refOutline && ref) outline(ref.map, W, H, thr, [255, 255, 255], img.data, wrapX);
+  if (state.showGaze && (refOutline || state.display.outline) && result && result.max > 0) outline(result.map, W, H, thr, [200, 245, 106], img.data, wrapX);
   hctx.putImageData(img, 0, 0);
+  // the reference heatmap has its own layer (under ours) and its own colours
+  const rctx = refCanvas.getContext('2d');
+  if (state.ref && state.refShow.heat && ref) {
+    if (refCanvas.width !== W || refCanvas.height !== H) { refCanvas.width = W; refCanvas.height = H; }
+    const rimg = rctx.createImageData(W, H);
+    colorize(normalised(ref.map), rimg.data, { ...colorOpts, colormap: state.refColormap || 'ice', mode: state.display.mode === 'off' || state.display.mode === 'spotlight' ? 'heat' : state.display.mode });
+    rctx.putImageData(rimg, 0, 0);
+  } else rctx.clearRect(0, 0, refCanvas.width, refCanvas.height);
   updateReferenceReadout(ref, result);
   state.last = { t, k, result, W, H };
   drawMarks(t, result);
@@ -381,7 +422,7 @@ async function loadReference(files) {
     state.ref = R;
     $('ref-name').textContent = R.name; $('ref-name').title = R.name;
     $('ref-size').textContent = `${R.N} × ${R.W} × ${R.H}${R.kind === 'bin' ? ' float32' : ''}`;
-    $('ref-offset').value = String(R.offset); $('ref-scale').value = '1'; $('clear-ref').disabled = false;
+    $('ref-offset').value = String(R.offset); $('ref-scale').value = '1'; $('clear-ref').disabled = false; syncLayerChips();
     const vFrames = video.duration ? Math.round(video.duration * state.fps) : 0;
     const msgs = [`Reference loaded: ${R.name}.`];
     if (R.kind === 'bin') msgs.push('Salient360 maps: frame offset +1 (bin frame 0 is empty, bin frame k belongs to video frame k − 1).');
@@ -392,10 +433,22 @@ async function loadReference(files) {
 }
 $('choose-ref').addEventListener('click', () => $('ref-input').click());
 $('ref-input').addEventListener('change', e => { if (e.target.files.length) loadReference([...e.target.files]); e.target.value = ''; });
-$('clear-ref').addEventListener('click', () => { state.ref = null; $('ref-name').textContent = $('ref-size').textContent = '—'; $('ref-status').textContent = 'No reference loaded.'; $('clear-ref').disabled = true; requestRender(); });
+$('clear-ref').addEventListener('click', () => { state.ref = null; syncLayerChips(); $('ref-name').textContent = $('ref-size').textContent = '—'; $('ref-status').textContent = 'No reference loaded.'; $('clear-ref').disabled = true; requestRender(); });
 $('ref-offset').addEventListener('change', e => { if (state.ref) { state.ref.offset = Math.round(Number(e.target.value) || 0); requestRender(); } });
 $('ref-scale').addEventListener('change', e => { if (state.ref) { state.ref.scale = Math.max(0.001, Number(e.target.value) || 1); requestRender(); } });
-$('ref-display').addEventListener('change', e => { state.refDisplay = e.target.value; requestRender(); });
+$('ref-heat').addEventListener('change', e => { state.refShow.heat = e.target.checked; syncLayerChips(); requestRender(); });
+$('ref-outline').addEventListener('change', e => { state.refShow.outline = e.target.checked; requestRender(); });
+$('ref-colormap').innerHTML = COLORMAPS.map(c => `<option value="${c}">${c[0].toUpperCase() + c.slice(1)}</option>`).join('');
+$('ref-colormap').value = 'ice';
+$('ref-colormap').addEventListener('change', e => { state.refColormap = e.target.value; requestRender(); });
+/** Toolbar chips: our gaze layer (heatmap, points, outline) and the reference heatmap, on and off. */
+function syncLayerChips() {
+  $('layer-gaze').classList.toggle('active', state.showGaze); $('layer-gaze').setAttribute('aria-pressed', String(state.showGaze));
+  $('layer-ref').classList.toggle('active', state.refShow.heat); $('layer-ref').setAttribute('aria-pressed', String(state.refShow.heat));
+  $('layer-ref').disabled = !state.ref; $('ref-heat').checked = state.refShow.heat;
+}
+$('layer-gaze').addEventListener('click', () => { state.showGaze = !state.showGaze; syncLayerChips(); requestRender(); });
+$('layer-ref').addEventListener('click', () => { state.refShow.heat = !state.refShow.heat; syncLayerChips(); requestRender(); });
 $('cov-thr').addEventListener('change', e => {
   state.settings.coverageThreshold = Math.min(0.99, Math.max(0.001, Number(e.target.value) || 0.1));
   $('ro-coverage-label').textContent = `COVERAGE ≥ ${state.settings.coverageThreshold} MAX`;
@@ -440,7 +493,7 @@ $('view-360').addEventListener('click', () => set360(!state.view));
   });
   glCanvas.addEventListener('pointerup', () => { drag = null; });
   glCanvas.addEventListener('wheel', e => { if (!state.view) return; e.preventDefault(); state.view.zoom(Math.exp(e.deltaY * 0.001)); redraw360(); }, { passive: false });
-  glCanvas.addEventListener('dblclick', () => { if (!state.view) return; Object.assign(state.view, { yaw: 0, pitch: 0, fov: 90 }); redraw360(); });
+  glCanvas.addEventListener('dblclick', () => { if (!state.view) return; state.view.yaw = 0; state.view.setMode(state.view.mode); redraw360(); });
 }
 
 function drawMarks(t, result) {
@@ -465,7 +518,7 @@ function drawMarks(t, result) {
       g.stroke();
     }
   }
-  if (state.display.showPoints && result) {
+  if (state.display.showPoints && state.showGaze && result) {
     const p = result.points;
     let wmax = 0;
     for (let i = 0; i < p.n; i++) wmax = Math.max(wmax, p.w[i]);
@@ -545,7 +598,7 @@ async function loadGazeFiles(list) {
       try {
         if (err) throw err;
         const parts = relOf(f).split('/');
-        parsed.push({ name: f.name, path: relOf(f), folder: parts.length > 1 ? parts[parts.length - 2] : '', folder2: parts.length > 2 ? parts[parts.length - 3] : '', table: parseTable(text, f.name) });
+        parsed.push({ name: f.name, path: relOf(f), key: `${f.name}|${f.size}|${f.lastModified}`, folder: parts.length > 1 ? parts[parts.length - 2] : '', folder2: parts.length > 2 ? parts[parts.length - 3] : '', table: parseTable(text, f.name) });
       } catch (e) { failed.push(`${relOf(f)}: ${e.message}`); }
     }
     if (files.length > 200) setStatus(`Reading gaze files… ${Math.min(files.length, i + 64)} / ${files.length}`);
@@ -561,12 +614,20 @@ async function loadGazeFiles(list) {
   const adding = current === ref;
   let added = same, replacedNote = '';
   if (adding) {
-    const have = new Set(state.files.map(f => f.path || f.name));
-    added = same.filter(f => !have.has(f.path || f.name));
+    // the same file (name, size and date) is not added twice, whichever way it was chosen
+    const have = new Set(state.files.map(f => f.key));
+    added = same.filter(f => !have.has(f.key));
     state.files = state.files.concat(added);
   } else {
     if (current) replacedNote = `These files have other columns than the ${state.files.length} loaded before, so they replace them.`;
     state.files = same; state.removedObservers = new Set();
+  }
+  // files with the same name (e.g. L/x.csv and R/x.csv chosen one at a time, without their folders) stay apart
+  const seen = new Map();
+  for (const f of state.files) {
+    const id = `${f.folder}/${f.name}`, n = (seen.get(id) || 0) + 1;
+    seen.set(id, n);
+    f.label = n > 1 ? `${f.name.replace(/\.[^.]+$/, '')} (${n})` : undefined;
   }
   state.loadReport = { chosen, read: files.length, filter: note, failed, otherColumns: other.map(o => ({ path: o.path, columns: o.table.columns })) };
   let presetNote = '';
@@ -760,7 +821,8 @@ async function analyseMotion() {
     pending.set(id, msg => { if (msg.error) failures++; else store.add(tA, tB, msg.u, msg.v); resolve(); });
     worker.postMessage({ id, a: A, b: B, W, H, wrap });
   });
-  const grab = () => { g.drawImage(probe, 0, 0, W, H); return toGray(g.getImageData(0, 0, W, H).data, W, H); };
+  const conv = converting() ? new LayoutConverter() : null, [rw, rh] = rawVideoSize(), layout = state.layout;
+  const grab = () => { g.drawImage(conv ? conv.convert(probe, layout, rw, rh, W, H) : probe, 0, 0, W, H); return toGray(g.getImageData(0, 0, W, H).data, W, H); };
   const started = performance.now();
   try {
     await once(probe, 'loadeddata', 15000);
@@ -955,7 +1017,7 @@ function debugReport() {
     `can play: H.264 ${can('video/mp4; codecs="avc1.42E01E"')}, VP9 ${can('video/webm; codecs="vp9"')}, AV1 ${can('video/mp4; codecs="av01.0.05M.08"')}, H.265 ${can('video/mp4; codecs="hvc1.1.6.L93.B0"')}`, '');
   L.push('VIDEO');
   if (!v) L.push('  none');
-  else L.push(`  ${v.name}${v.size ? ' (' + bytesText(v.size) + ')' : ''}${v.remote ? ' link: ' + v.src : ''}`, `  ${vw} × ${vh}, ${fmt(video.duration, 2)} s, ${fmt(state.fps, 3)} fps (${state.fpsSource}), ready state ${video.readyState}, pixels ${v.tainted ? 'not readable (no CORS)' : 'readable'}`,
+  else L.push(`  ${v.name}${v.size ? ' (' + bytesText(v.size) + ')' : ''}${v.remote ? ' link: ' + v.src : ''}`, `  ${rawVideoSize().join(' × ')}, layout ${state.layout} (${LAYOUTS[state.layout].label})${converting() ? `, unfolded to ${vw} × ${vh}` : ''}, ${fmt(video.duration, 2)} s, ${fmt(state.fps, 3)} fps (${state.fpsSource}), ready state ${video.readyState}, pixels ${v.tainted ? 'not readable (no CORS)' : 'readable'}`,
     `  playhead ${fmt(video.currentTime, 3)} s${video.error ? `, error ${video.error.code}: ${video.error.message}` : ''}`);
   L.push('', 'GAZE');
   if (!state.files.length) L.push('  none');
@@ -974,7 +1036,7 @@ function debugReport() {
   if (state.removedObservers?.size) L.push(`  removed observers: ${[...state.removedObservers].join(', ')}`);
   L.push('', 'REFERENCE');
   if (!state.ref) L.push('  none');
-  else L.push(`  ${state.ref.name}: ${state.ref.kind}, ${state.ref.N} frame(s) of ${state.ref.W} × ${state.ref.H}, offset ${state.ref.offset}, rate ${state.ref.scale}, showing ${state.refDisplay}`,
+  else L.push(`  ${state.ref.name}: ${state.ref.kind}, ${state.ref.N} frame(s) of ${state.ref.W} × ${state.ref.H}, offset ${state.ref.offset}, rate ${state.ref.scale}, showing ${[state.refShow.heat && 'heatmap', state.refShow.outline && 'outline'].filter(Boolean).join(' + ') || 'numbers only'}`,
     `  ${$('ro-ref').textContent} — ${$('ro-ref-detail').textContent}${state.ref.error ? ' — ERROR ' + state.ref.error : ''}`);
   L.push('', '360° VIEW', state.view ? `  on, yaw ${fmt(state.view.yaw, 1)}°, pitch ${fmt(state.view.pitch, 1)}°, field of view ${fmt(state.view.fov, 0)}°` : '  off');
   L.push('', 'SETTINGS', '  ' + JSON.stringify(state.settings));
@@ -1105,8 +1167,9 @@ function compositeCanvas(maxWidth = 3840) {
 }
 function drawComposite(c) {
   const g = c.getContext('2d');
-  g.drawImage(video, 0, 0, c.width, c.height);
-  if (state.display.mode !== 'off' || state.display.outline || (state.ref && state.refDisplay === 'contours')) { g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high'; g.drawImage(heatCanvas, 0, 0, c.width, c.height); }
+  g.drawImage(converting() ? $('erp-canvas') : video, 0, 0, c.width, c.height);
+  if (state.ref && state.refShow.heat) g.drawImage(refCanvas, 0, 0, c.width, c.height);
+  { g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high'; g.drawImage(heatCanvas, 0, 0, c.width, c.height); }
   g.drawImage(marksCanvas, 0, 0, c.width, c.height);
 }
 $('export-snapshot').addEventListener('click', () => {
@@ -1246,3 +1309,7 @@ $('empty-sample').addEventListener('click', () => loadSample('erp'));
 updateButtons(); updateExportSummary();
 Object.assign(window.overgaze, { render, exportMaps });
 document.addEventListener('click', e => { const d = e.target.closest('[data-dismiss]'); if (d) $(d.dataset.dismiss).hidden = true; });
+$('layout').innerHTML = Object.entries(LAYOUTS).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join('');
+$('layout').addEventListener('change', e => setLayout(e.target.value, true));
+$('view360-mode').innerHTML = Object.entries(VIEW_MODES).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join('');
+$('view360-mode').addEventListener('change', e => { if (state.view) { state.view.setMode(e.target.value); $('view360-follow').checked = false; redraw360(); } });

@@ -47,7 +47,7 @@ Both are recognised on sight; their usual settings are filled in and written in 
 
 The box **Only files whose path contains** overrides the automatic choice of files.
 
-**Load files** and **Load folder** add to what is loaded when the new files have the same columns (one column mapping serves them all; files loaded twice are skipped); files of another format replace the loaded ones. **clear all** removes every gaze file. In the observer list, × removes one observer (with one observer per file, that file) and *bring back* restores them. Notices and errors close with their ×, and loading another video clears the old error.
+**Load files** and **Load folder** add to what is loaded when the new files have the same columns (one column mapping serves them all). A file counts as loaded already when its name, size and date match, however it was chosen; different files with the same name (say `L/x.csv` and `R/x.csv` chosen one at a time) are both kept and told apart as `x` and `x (2)`; files of another format replace the loaded ones. **clear all** removes every gaze file. In the observer list, × removes one observer (with one observer per file, that file) and *bring back* restores them. Notices and errors close with their ×, and loading another video clears the old error.
 
 **Something wrong?** **Copy debug details** (in the export panel and the help menu) copies a plain-text report: browser and the video codecs it can play, the video (size, frame rate, errors), every gaze file used with its row count, files that could not be read or had other columns, the column mapping and any mapping error, settings, motion analysis, and every notice and error so far. Paste it into a message or bug report.
 
@@ -59,13 +59,34 @@ The box **Only files whose path contains** overrides the automatic choice of fil
 - a `.npy` array (frames, height, width) or (height, width), float16 / 32 / 64 or uint8, such as the `sal.npy` of the pooled training maps,
 - one image (a static map such as `<n>_<Name>_saliency.png`) or one image per frame (ordered by the number in the name).
 
-Reference frame = video frame × *ref. frames per video frame* + *frame offset*. **Show**: outlines of the area at or above the coverage threshold (reference white, ours lime), the reference heatmap instead of ours, or nothing. The readout **vs reference** gives the correlation of the two maps (CC), the overlap of the two thresholded areas (intersection over union) and the reference's coverage. The **coverage threshold** (display panel, default 0.1 × frame maximum) applies to the outlines, the coverage readout and the coverage written into `frames.csv`; **Outline the coverage area** draws our outline without a reference.
+Reference frame = video frame × *ref. frames per video frame* + *frame offset*. Switches: **Reference heatmap** (its own layer under ours, in its own colours, “ice” by default) and **Outlines** of the area at or above the coverage threshold (reference white, ours lime). The **Gaze** and **Reference** buttons above the video switch our layer (heatmap, points, outline) and the reference heatmap on and off, so either can be seen alone or both together. The readout **vs reference** gives the correlation of the two maps (CC), the overlap of the two thresholded areas (intersection over union) and the reference's coverage. The **coverage threshold** (display panel, default 0.1 × frame maximum) applies to the outlines, the coverage readout and the coverage written into `frames.csv`; **Outline the coverage area** draws our outline without a reference.
 
 Check: Salient360 `1_PortoRiverside` with both eyes' fixations, σ 2°, window 0, against its `.bin`: CC 1.000 and overlap 98.5 % at 3, 8 and 12.5 s, i.e. the frame alignment and the Gaussian match the dataset's own maps.
 
-## 360° view
+## Video layouts and 360° views
 
-**360° view** (above the video, for 360° videos whose pixels can be read) shows a perspective view from inside the sphere, like the 360° players of YouTube or VLC, with the heatmap, outlines and gaze points on it. Drag to look around, use the wheel to zoom (field of view 25–130°), double-click to reset. **follow the gaze** turns the view towards the maximum of the current map, smoothly while playing. Exports are unchanged (equirectangular).
+**Video layout** (panel A) says how the 360° picture is stored in the video. Other layouts than plain equirectangular are unfolded to an equirectangular frame on the graphics card, and the overlay, motion analysis, snapshots and the 360° view all work on that frame:
+
+| layout | frame | guessed from the shape |
+|---|---|---|
+| Equirectangular | 2:1 (also stretched 16:9 full-sphere videos) | 2:1 and anything not listed below |
+| Equirectangular, stereo top-bottom | top half used | 1:1 |
+| Equirectangular, stereo side by side | left half used | 4:1 |
+| Cubemap 3 × 2 | faces right, left, up / down, front, back | — (3:2 is taken as the next one) |
+| Cube strip 6 × 1 and 1 × 6 | same face order in one row or column | 6:1, 1:6 |
+| Equi-angular cubemap 3 × 2 (YouTube) | left, front, right / down, back, up (bottom row turned), 2-pixel padding | 3:2 |
+
+The cube layouts follow ffmpeg's `v360` filter (default face order and rotation), which is how such files are usually made: unfolding ffmpeg's cubemap and equi-angular cubemap output gives exactly ffmpeg's own equirectangular result (`tools/fit_cube_faces.mjs` fits the face table; a browser test checks both against the original). A YouTube equi-angular cubemap download (YT360 `AnfsPA5FXh4-1215`, 3840 × 2160) unfolds without seams, with the fixations on the people and the crossing. Choose the layout by hand when the shape is ambiguous: 16:9 files can be stretched equirectangular (most YT360 clips) or equi-angular cubemap (that one).
+
+**360° view** (above the video, for 360° videos whose pixels can be read) shows the frame from inside the sphere with the heatmap, outlines and gaze points on it:
+
+- **Perspective**, like the 360° players of YouTube or VLC (field of view 25–130°),
+- **Little planet** (stereographic projection looking down, up to 330°),
+- **Fisheye** (equidistant, up to 360°).
+
+Drag to look around, use the wheel to zoom, double-click to reset. **follow the gaze** turns the view towards the maximum of the current map, smoothly while playing. Exports stay equirectangular.
+
+The list of layouts and views is modelled on [egjs-view360](https://github.com/naver/egjs-view360) by NAVER (MIT licence): its equirectangular, stereo equirectangular, cubemap, cube strip and equi-angular cubemap projections and its little-planet view. OverGaze does not include its code; the shaders are written for OverGaze.
 
 ![360° view](docs/screenshots/11-360-view.png)
 
@@ -145,4 +166,4 @@ python3 tools/make_sample_2d.py  # regenerate the 2D sample (ffmpeg)
 
 The unit tests cover parsing and mapping (including the VR-EyeTracking and YT360 formats), the sphere Gaussian, pooling (Gaussian weights, fixations over frames), the speed filter, optical flow, motion-compensated pooling, frame-rate estimation and the ZIP / NPY / PNG writers. The browser tests start a small static server and a headless Chrome (`tools/cdp.mjs`, no dependencies, Node 22+ for the built-in WebSocket) and check: the sample loads with a clean console and draws the heatmap, `file://` shows the warning, motion compensation shrinks the pooled map, the export ZIP is complete, and a VR-EyeTracking-style folder is filtered and read correctly. Set `CHROME=/path/to/chrome` to choose the browser.
 
-`src/` holds `gaze.js` (parsing and coordinates), `saliency.js` (pooling and Gaussians), `flow.js` (optical flow and the flow store), `timing.js` (frame rate), `reference.js` (reference maps), `view360.js` (WebGL 360° view), `export.js` (writers), `colormap.js`, the two workers and `app.js` (interface). `window.overgaze` exposes the state, `applySettings(...)` and `mapAt(frame, width)` (the raw map the export would write) for tests and the console.
+`src/` holds `gaze.js` (parsing and coordinates), `saliency.js` (pooling and Gaussians), `flow.js` (optical flow and the flow store), `timing.js` (frame rate), `reference.js` (reference maps), `projections.js` (video layouts), `view360.js` (WebGL unfolding and 360° views), `export.js` (writers), `colormap.js`, the two workers and `app.js` (interface). `window.overgaze` exposes the state, `applySettings(...)` and `mapAt(frame, width)` (the raw map the export would write) for tests and the console.

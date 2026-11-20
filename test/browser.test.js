@@ -129,6 +129,18 @@ test('gaze files add up, observers can be removed, messages can be dismissed, a 
     await b.click('#notice .dismiss');
     assert.equal(await b.eval('document.querySelector("#notice").hidden'), true);
 
+    // two different files with the same name (chosen one at a time, so without folders) are both kept; the same file twice is not
+    mkdirSync(join(dir, 'L')); mkdirSync(join(dir, 'R'));
+    writeFileSync(join(dir, 'L', 'same.csv'), csv + '7,1.0,2.0,0.5,0.5\n');
+    writeFileSync(join(dir, 'R', 'same.csv'), csv + '8,1.0,2.0,0.5,0.5\n9,1.0,2.0,0.5,0.5\n');
+    await b.setFiles('#gaze-input', [join(dir, 'L', 'same.csv')]);
+    await b.waitFor('overgaze.state.files.length === 3', 5000, 'L/same.csv added');
+    await b.setFiles('#gaze-input', [join(dir, 'R', 'same.csv')]);
+    await b.waitFor('overgaze.state.files.length === 4', 5000, 'R/same.csv added although it has the same name');
+    await b.setFiles('#gaze-input', [join(dir, 'R', 'same.csv')]);
+    await new Promise(r => setTimeout(r, 500));
+    assert.equal(await b.eval('overgaze.state.files.length'), 4, 'the same file is not added twice');
+
     // reference with the default 0 offset: video frame 0 ↔ reference frame 0; then offset −45 puts frame 0 at video frame 45 (1.5 s)
     await b.setFiles('#ref-input', [join(dir, 'ref.npy')]);
     await b.waitFor('!!overgaze.state.ref', 5000);
@@ -141,8 +153,46 @@ test('gaze files add up, observers can be removed, messages can be dismissed, a 
     await b.waitFor('!document.querySelector("#view360-canvas").hidden', 3000);
     const px = await b.eval('(()=>{const c=document.querySelector("#view360-canvas");const g=c.getContext("webgl2");const p=new Uint8Array(4);g.readPixels(c.width>>1,c.height>>1,1,1,g.RGBA,g.UNSIGNED_BYTE,p);return [c.width,p[3]]})()');
     assert.ok(px[0] > 100 && px[1] === 255, `360° view drew something: ${px}`);
+    // other views: little planet and fisheye draw too; layers can be switched off
+    for (const mode of ['planet', 'fisheye']) {
+      await b.eval(`document.querySelector('#view360-mode').value = '${mode}'; document.querySelector('#view360-mode').dispatchEvent(new Event('change')); 1`);
+      assert.equal(await b.eval('overgaze.state.view.mode'), mode);
+    }
+    await b.click('#layer-gaze');
+    assert.equal(await b.eval('overgaze.state.showGaze'), false);
     await b.click('#clear-gaze');
     assert.equal(await b.eval('overgaze.state.gaze'), null);
     assert.deepEqual(b.logs.filter(l => !/WebGL|GPU stall|swiftshader/i.test(l)), []);
+  } finally { b.close(); server.close(); }
+});
+
+test('a cubemap or equi-angular cubemap video is unfolded to the same equirectangular frame', { skip: opts.skip || (spawnSync('ffmpeg', ['-version']).status !== 0 && 'ffmpeg not available') }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'overgaze-layout-'));
+  for (const [name, out] of [['eac', 'w=768:h=512'], ['c3x2', 'w=768:h=512']]) {
+    const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-i', join(ROOT, 'sample', 'sample_erp.mp4'), '-t', '3', '-vf', `v360=input=e:output=${name}:${out}`, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', join(dir, `${name}.mp4`)]);
+    assert.equal(r.status, 0, String(r.stderr));
+  }
+  const { server, url } = await serve(), b = await launch();
+  const grey = sel => `(()=>{const c=document.createElement('canvas');c.width=256;c.height=128;const g=c.getContext('2d');g.drawImage(${sel},0,0,256,128);const d=g.getImageData(0,0,256,128).data;const o=[];for(let i=0;i<d.length;i+=4)o.push(d[i]+d[i+1]+d[i+2]);return o})()`;
+  const cc = (a, b) => { const n = a.length, ma = a.reduce((x, y) => x + y) / n, mb = b.reduce((x, y) => x + y) / n; let s = 0, sa = 0, sb = 0; for (let i = 0; i < n; i++) { s += (a[i] - ma) * (b[i] - mb); sa += (a[i] - ma) ** 2; sb += (b[i] - mb) ** 2; } return s / Math.sqrt(sa * sb); };
+  try {
+    await b.goto(url);
+    await b.setFiles('#video-input', [join(ROOT, 'sample', 'sample_erp.mp4')]);
+    await b.waitFor('document.querySelector("#video").readyState >= 2', 20000);
+    await b.eval('document.querySelector("#video").currentTime = 1.5; new Promise(r => document.querySelector("#video").addEventListener("seeked", r, { once: true }))');
+    const ref = await b.eval(grey('document.querySelector("#video")'));
+    for (const name of ['eac', 'c3x2']) {
+      await b.setFiles('#video-input', [join(dir, `${name}.mp4`)]);
+      await b.waitFor(`document.querySelector("#video-name").textContent === "${name}.mp4" && document.querySelector("#video").readyState >= 2`, 20000);
+      if (name === 'c3x2') await b.eval(`document.querySelector('#layout').value = 'c3x2'; document.querySelector('#layout').dispatchEvent(new Event('change')); 1`);
+      else assert.equal(await b.eval('overgaze.state.layout'), 'eac', 'a 3:2 video is taken as equi-angular cubemap');
+      await b.eval('document.querySelector("#video").currentTime = 1.5; new Promise(r => document.querySelector("#video").addEventListener("seeked", r, { once: true }))');
+      await new Promise(r => setTimeout(r, 500));
+      await b.eval('overgaze.render(); 1');
+      const c = cc(ref, await b.eval(grey('document.querySelector("#erp-canvas")')));
+      if (!(c > 0.9)) console.log(await b.eval('document.querySelector("#error-text").textContent'), b.logs);
+      assert.ok(c > 0.9, `${name} unfolded frame correlates ${c.toFixed(3)} with the original`);
+      assert.deepEqual(await b.eval('overgaze.videoSize ? 1 : 1'), 1);
+    }
   } finally { b.close(); server.close(); }
 });

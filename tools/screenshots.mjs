@@ -54,6 +54,9 @@ try {
   await b.eval(`document.querySelector('#view360-follow').checked = true; overgaze.render(); overgaze.render(); 1`);
   await sleep(800);
   await page('11-360-view.png');
+  await b.eval(`document.querySelector('#view360-mode').value = 'planet'; document.querySelector('#view360-mode').dispatchEvent(new Event('change')); overgaze.render(); 1`);
+  await sleep(500);
+  await page('12-little-planet.png');
   await b.click('#view-360');
 
   // 6. settings panels

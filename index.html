@@ -45,6 +45,8 @@
         <div class="button-row"><button id="choose-video" class="button button-outline" type="button">▱ Load video file</button></div>
         <label class="input-label" for="video-url">OR A DIRECT LINK (.mp4 / .webm)</label>
         <div class="url-row"><input id="video-url" type="url" placeholder="https://…/clip.mp4"><button id="load-video-url" class="button button-outline" type="button">Open</button></div>
+        <label class="input-label" for="layout">VIDEO LAYOUT</label>
+        <div class="select-wrap"><select id="layout"></select></div>
         <dl class="details compact"><div><dt>File</dt><dd id="video-name">—</dd></div><div><dt>Size</dt><dd id="video-size">—</dd></div><div><dt>Duration</dt><dd id="video-duration">—</dd></div><div><dt>Pixels</dt><dd id="video-access">—</dd></div></dl>
       </section>
 
@@ -103,8 +105,10 @@
           <label>Frame offset<input id="ref-offset" type="number" step="1" value="0" title="reference frame = video frame × rate + offset"></label>
           <label>Ref. frames per video frame<input id="ref-scale" type="number" step="0.01" min="0.01" value="1"></label>
         </div>
-        <label class="input-label" for="ref-display">SHOW</label>
-        <div class="select-wrap"><select id="ref-display"><option value="contours">Outlines: reference white, ours lime</option><option value="heat">Reference heatmap (instead of ours)</option><option value="off">Nothing (numbers only)</option></select></div>
+        <label class="view-switch"><span>Reference heatmap</span><input id="ref-heat" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="view-switch"><span>Outlines (reference white, ours lime)</span><input id="ref-outline" type="checkbox" role="switch" checked><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="input-label" for="ref-colormap">REFERENCE COLOURS</label>
+        <div class="select-wrap"><select id="ref-colormap"></select></div>
         <p id="ref-status" class="hint">No reference loaded.</p>
       </section>
       <div class="sidebar-footer"><div class="shortcut-icon">⌘</div><div><strong>Made for visual checking</strong><span>Your files never leave your device.</span></div></div>
@@ -114,7 +118,7 @@
       <div class="workspace-header"><div><div class="breadcrumb">WORKSPACE <span>/</span> <strong>GAZE OVERLAY</strong></div><h1>See where people look<span class="accent">.</span></h1><p>Turn fixations into saliency, tune it live, export the maps.</p></div><div class="workspace-header-right"><span class="status-dot"></span> <span id="status">Ready</span></div></div>
 
       <div class="viewer-card">
-        <div class="viewer-toolbar"><div class="viewer-title"><span class="viewer-icon">◉</span><div><strong id="viewer-name">Canvas</strong><span id="viewer-subtitle">Load a video and gaze data</span></div></div><div class="toolbar-right"><span id="readout-badge" class="dimension-badge" hidden></span><button id="view-360" class="button button-outline small" type="button" title="Look around inside the 360° video, like a 360° player" disabled>360° view</button><span class="live-badge"><span></span> LIVE OVERLAY</span></div></div>
+        <div class="viewer-toolbar"><div class="viewer-title"><span class="viewer-icon">◉</span><div><strong id="viewer-name">Canvas</strong><span id="viewer-subtitle">Load a video and gaze data</span></div></div><div class="toolbar-right"><span id="readout-badge" class="dimension-badge" hidden></span><button id="layer-gaze" class="button button-outline small layer-chip active" type="button" aria-pressed="true" title="Our heatmap, gaze points and outline">Gaze</button><button id="layer-ref" class="button button-outline small layer-chip" type="button" aria-pressed="false" title="Reference heatmap" disabled>Reference</button><button id="view-360" class="button button-outline small" type="button" title="Look around inside the 360° video, like a 360° player" disabled>360° view</button><span class="live-badge"><span></span> LIVE OVERLAY</span></div></div>
         <div id="drop-zone" class="canvas-area">
           <div id="empty-state" class="empty-state">
             <div class="empty-art" aria-hidden="true"><div class="art-layer art-layer-back"></div><div class="art-layer art-layer-middle"></div><div class="art-layer art-layer-front"><span>◉</span></div><i class="art-spark art-spark-one">✳</i><i class="art-spark art-spark-two">✦</i></div>
@@ -127,11 +131,13 @@
           <div id="stage-wrap" class="stage-wrap" hidden>
             <div id="stage" class="stage">
               <video id="video" playsinline muted preload="auto"></video>
+              <canvas id="erp-canvas" hidden></canvas>
+              <canvas id="ref-canvas"></canvas>
               <canvas id="heat-canvas"></canvas>
               <canvas id="marks-canvas"></canvas>
               <canvas id="view360-canvas" hidden></canvas>
             </div>
-            <div id="view360-bar" class="view360-bar" hidden><span>drag to look around · wheel to zoom · double-click to reset</span><label><input id="view360-follow" type="checkbox"> follow the gaze</label><span id="view360-info"></span></div>
+            <div id="view360-bar" class="view360-bar" hidden><select id="view360-mode" aria-label="View"></select><span>drag to look around · wheel to zoom · double-click to reset</span><label><input id="view360-follow" type="checkbox"> follow the gaze</label><span id="view360-info"></span></div>
           </div>
           <div id="error-message" class="error-message" role="alert" hidden><span id="error-text"></span><button class="dismiss" type="button" data-dismiss="error-message" aria-label="Dismiss" title="Dismiss">×</button></div>
         </div>

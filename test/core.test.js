@@ -264,3 +264,14 @@ test('reference helpers: npy header, resampling and map comparison', () => {
   const c = compareMaps(a, a, 0.5);
   close(c.cc, 1, 1e-9); assert.equal(c.iou, 1); assert.equal(c.coverageA, 0.5);
 });
+
+test('video layouts: cube faces and the padded equi-angular cubemap land where ffmpeg puts them', async () => {
+  const { dirToUV, erpSize, uvToDir } = await import('../src/projections.js');
+  const front = [0, 0, 1];
+  assert.deepEqual(dirToUV('c3x2', front), [0.5, 0.75], 'cubemap 3 × 2: front face is tile 4 (middle of the bottom row)');
+  const [u, v] = dirToUV('eac', front, undefined, [768, 512]);
+  close(u, 0.5, 1e-9); close(v, 0.25, 1e-9, 'equi-angular cubemap: front face in the middle of the top row');
+  assert.deepEqual(dirToUV('erp-tb', front), [0.5, 0.25]); assert.deepEqual(dirToUV('erp-lr', front), [0.25, 0.5]);
+  assert.deepEqual(erpSize('eac', 3072, 2048), [4096, 2048]); assert.deepEqual(erpSize('erp-tb', 3840, 3840), [3840, 1920]);
+  const back = dirToUV('erp', uvToDir(0.3, 0.7)); close(back[0], 0.3, 1e-9); close(back[1], 0.7, 1e-9);
+});

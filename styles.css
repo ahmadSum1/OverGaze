@@ -95,3 +95,9 @@ input[type=range]{accent-color:var(--lime);width:100%}
 #view-360.active{background:var(--lime);color:#11131a;border-color:var(--lime)}
 .side-section code{font-size:11px;color:#d7dbd2}
 #clear-gaze{white-space:nowrap}
+
+.layer-chip{opacity:.55}.layer-chip.active{opacity:1;border-color:var(--lime);color:var(--lime)}
+#erp-canvas{z-index:1}#ref-canvas{z-index:1}#heat-canvas{z-index:2}#marks-canvas{z-index:2}
+.view360-bar select{background:#20232b;color:#e5e8e1;border:1px solid #393d47;border-radius:4px;font-size:11px;padding:2px 4px}
+.view360-bar select{min-width:120px;flex:none}
+.view360-bar select{width:auto!important}
