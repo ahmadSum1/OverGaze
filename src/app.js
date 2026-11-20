@@ -1319,7 +1319,10 @@ Object.assign(window.overgaze, { render, exportMaps });
 document.addEventListener('click', e => { const d = e.target.closest('[data-dismiss]'); if (d) $(d.dataset.dismiss).hidden = true; });
 $('layout').innerHTML = Object.entries(LAYOUTS).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join('');
 $('layout').addEventListener('change', e => setLayout(e.target.value, true));
-$('view360-mode').innerHTML = Object.entries(VIEW_MODES).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join('');
+{
+  const opt = ([k, v]) => `<option value="${k}">${v.label}</option>`, all = Object.entries(VIEW_MODES);
+  $('view360-mode').innerHTML = `<optgroup label="Look around">${all.filter(([, v]) => !v.group).map(opt).join('')}</optgroup><optgroup label="Unfolded (whole sphere)">${all.filter(([, v]) => v.group).map(opt).join('')}</optgroup>`;
+}
 $('view360-mode').addEventListener('change', e => { if (state.view) { state.view.setMode(e.target.value); $('view360-follow').checked = false; redraw360(); } });
 
 // layout options: cube face order and mirroring (like egjs-view360's cubemapOrder / cubemapFlipX), cylinder coverage

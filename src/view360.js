@@ -4,7 +4,7 @@
 //  - View360 shows an equirectangular frame from inside the sphere: perspective (like the 360° players of YouTube
 //    or VLC), little planet (stereographic) or fisheye (equidistant). These views follow egjs-view360 (NAVER,
 //    MIT licence, https://github.com/naver/egjs-view360); the shaders are our own.
-import { DEFAULT_OPTIONS, faceTables, glslLayout, layoutIndex } from './projections.js';
+import { DEFAULT_OPTIONS, FACES, FACE_TABLES, faceTables, glslLayout, layoutIndex } from './projections.js';
 
 const VS = `#version 300 es
 in vec2 p; out vec2 ndc;
@@ -68,8 +68,29 @@ void main() {
 export const VIEW_MODES = {
   perspective: { label: 'Perspective', fov: [25, 130], start: { fov: 90 } },
   planet: { label: 'Little planet', fov: [60, 330], start: { fov: 260, pitch: -90 } },
-  fisheye: { label: 'Fisheye', fov: [60, 360], start: { fov: 180 } }
+  fisheye: { label: 'Fisheye', fov: [60, 360], start: { fov: 180 } },
+  // the whole sphere unfolded into another layout (drag still turns it)
+  cubemap: { label: 'Cubemap 3 × 2', group: 'Unfolded', fov: [90, 90], start: { fov: 90 }, flat: 1.5 },
+  eac: { label: 'Equi-angular cubemap', group: 'Unfolded', fov: [90, 90], start: { fov: 90 }, flat: 1.5 },
+  cylinder: { label: 'Cylinder', group: 'Unfolded', fov: [90, 90], start: { fov: 90 }, flat: 2 }
 };
+
+/** GLSL: direction of a point (s, t in −1…1) of tile `tile` in a 3 × 2 cube layout (inverse of layoutUV). */
+function glslTileDir() {
+  const keys = ['r', 'l', 'u', 'd', 'f', 'b'];
+  const byTile = table => keys.map(k => [k, ...table[k]]).sort((a, b) => a[1] - b[1]);   // [face, tile, rot, flip]
+  const body = (name, table) => byTile(table).map(([k, tile, rot, flip]) =>
+    `if (tile == ${tile}) { for (int i = 0; i < ${rot}; i++) { float q = s; s = t; t = -q; } ${flip ? 's = -s; ' : ''}return vec3(${FACES[k].c}) + s * vec3(${FACES[k].s}) + t * vec3(${FACES[k].t}); }`).join('\n  ');
+  return `
+vec3 cubeDir(int tile, float s, float t) {
+  ${body('cube', FACE_TABLES.c3x2)}
+  return vec3(0.0, 0.0, 1.0);
+}
+vec3 eacDir(int tile, float s, float t) {
+  ${body('eac', FACE_TABLES.eac).replace(/for \(int i/g, 'for (int i').replace(/return vec3\(/g, 'return vec3(')}
+  return vec3(0.0, 0.0, 1.0);
+}`;
+}
 
 export class View360 {
   constructor(canvas) {
@@ -80,10 +101,28 @@ precision highp float;
 in vec2 ndc; out vec4 color;
 uniform sampler2D erp; uniform float yaw, pitch, fov, aspect; uniform int mode;
 const float PI = 3.141592653589793;
+uniform float flatAspect;
+${glslTileDir()}
 void main() {
   vec2 q = vec2(ndc.x * aspect, ndc.y);
   vec3 d;
-  if (mode == 0) d = normalize(vec3(q * tan(fov / 2.0), 1.0));                         // perspective
+  if (mode >= 3) {
+    // unfolded layouts: fit a box of the layout's shape into the view
+    vec2 box = aspect > flatAspect ? vec2(flatAspect, 1.0) : vec2(aspect, aspect / flatAspect);
+    vec2 uv = vec2(q.x / box.x * 0.5 + 0.5, 0.5 - q.y / box.y * 0.5);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { color = vec4(0.067, 0.075, 0.102, 1.0); return; }
+    if (mode == 5) {                                                // cylinder, 360° around, height = tan(elevation)
+      float lon = (uv.x - 0.5) * 2.0 * PI, h = (0.5 - uv.y) * 2.0 * PI / flatAspect;
+      d = vec3(sin(lon), h, cos(lon));
+    } else {
+      int tile = int(floor(uv.x * 3.0)) + 3 * int(floor(uv.y * 2.0));
+      float s = fract(uv.x * 3.0) * 2.0 - 1.0, t = 1.0 - fract(uv.y * 2.0) * 2.0;
+      if (mode == 4) { s = tan(s * PI / 4.0); t = tan(t * PI / 4.0); d = eacDir(tile, s, t); }
+      else d = cubeDir(tile, s, t);
+    }
+    d = normalize(d);
+  }
+  else if (mode == 0) d = normalize(vec3(q * tan(fov / 2.0), 1.0));                         // perspective
   else if (mode == 1) { q *= tan(fov / 4.0); float r2 = dot(q, q);                     // stereographic
     d = vec3(2.0 * q, 1.0 - r2) / (1.0 + r2); }
   else { float th = length(q) * fov / 2.0;                                             // equidistant fisheye
@@ -115,6 +154,7 @@ void main() {
     gl.uniform1f(this.p.u('yaw'), this.yaw * D); gl.uniform1f(this.p.u('pitch'), this.pitch * D);
     gl.uniform1f(this.p.u('fov'), this.fov * D); gl.uniform1f(this.p.u('aspect'), w / h);
     gl.uniform1i(this.p.u('mode'), Object.keys(VIEW_MODES).indexOf(this.mode));
+    gl.uniform1f(this.p.u('flatAspect'), VIEW_MODES[this.mode].flat || 2);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
   /** Turn by a drag of (dx, dy) screen pixels: the content follows the pointer. */

@@ -86,6 +86,9 @@ The cube layouts follow ffmpeg's `v360` filter (default face order and rotation)
 - **Perspective**, like the 360° players of YouTube or VLC (field of view 25–130°),
 - **Little planet** (stereographic projection looking down, up to 330°),
 - **Fisheye** (equidistant, up to 360°).
+- **Unfolded**: the whole sphere laid out as a **cubemap 3 × 2**, an **equi-angular cubemap** or a **cylinder** (360° around, ±57.5° up and down), with the overlay on it; dragging turns the sphere. These match ffmpeg's conversions of the same frame (correlation 0.99; 0.94 for the equi-angular cubemap, where ffmpeg adds a 2-pixel border).
+
+The view menu sets how the frame is *shown*; how the video file *stores* the picture is set by **Video layout** in panel A.
 
 Drag to look around, use the wheel to zoom, double-click to reset. **follow the gaze** turns the view towards the maximum of the current map, smoothly while playing. Exports stay equirectangular.
 
