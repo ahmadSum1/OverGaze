@@ -19,7 +19,7 @@ self.onmessage = async event => {
     if (m.cmd === 'frame') {
       const { gaze, settings, W, H, format, ctx, work } = job;
       const r = renderMap(gaze, m.t, settings, W, H, ctx, work);
-      const cov = coverage(r.map, W, H, 0.1, settings.projection !== 'planar');
+      const cov = coverage(r.map, W, H, settings.coverageThreshold ?? 0.1, settings.projection !== 'planar');
       const bytes = format === 'png8' || format === 'png16'
         ? await encodeGrayPng(r.map, W, H, format === 'png16' ? 16 : 8)
         : npyBody(r.map, format === 'npyu1' ? '|u1' : '<f4');

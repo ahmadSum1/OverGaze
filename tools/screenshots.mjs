@@ -49,6 +49,13 @@ try {
   await page('05-spotlight.png');
   await set([['mode', 'heat']]);
 
+  // 11. 360° view: look around inside the frame, following the gaze
+  await b.click('#view-360');
+  await b.eval(`document.querySelector('#view360-follow').checked = true; overgaze.render(); overgaze.render(); 1`);
+  await sleep(800);
+  await page('11-360-view.png');
+  await b.click('#view-360');
+
   // 6. settings panels
   await region('06-pooling-settings.png', '.settings-section:has(#window)');
   await region('06a-motion-settings.png', '.settings-section:has(#motion)');

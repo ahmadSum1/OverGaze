@@ -1,8 +1,10 @@
-import { FILE_TIME, buildGaze, columnValues, defaultRanges, detectMapping, gazeToCsv, parseTable, pathMatchesVideo, velocityFilter } from './gaze.js';
+import { FILE_TIME, buildGaze, columnValues, dropObservers, defaultRanges, detectMapping, gazeToCsv, parseTable, pathMatchesVideo, velocityFilter } from './gaze.js';
 import { DEFAULTS, coverage, frameCentre, frameOf, mapSize, renderMap } from './saliency.js';
 import { FlowStore, toGray } from './flow.js';
 import { ZipWriter, encodeGrayPng, npyHeader } from './export.js';
 import { fpsFromDeltas } from './timing.js';
+import { compareMaps, openReference, resample } from './reference.js';
+import { View360, wrap180 } from './view360.js';
 import { COLORMAPS, colorize, cssGradient } from './colormap.js';
 
 const VERSION = '1.0.0';
@@ -17,7 +19,8 @@ const state = {
   settings: { ...DEFAULTS, velocity: 0 },
   display: { mode: 'heat', colormap: 'jet', opacity: 0.65, gamma: 1, mapWidth: 512, showPoints: true, showFlow: false },
   flow: null, flowInfo: null, analysing: null, exporting: null, recording: null,
-  work: {}, last: null, renderQueued: false, projectionTouched: false, density: null
+  work: {}, last: null, renderQueued: false, projectionTouched: false, density: null,
+  ref: null, refDisplay: 'contours', removedObservers: new Set(), view: null
 };
 
 // Handle for the tests and the console: mapAt(frame, width) renders the same map the export writes (raw, unnormalised).
@@ -43,9 +46,9 @@ window.addEventListener('unhandledrejection', e => remember('unhandled promise',
 function notice(text, warn = false) {
   remember(warn ? 'warning' : 'notice', text);
   const n = $('notice');
-  n.hidden = !text; n.textContent = text || ''; n.classList.toggle('warn', warn);
+  n.hidden = !text; $('notice-text').textContent = text || ''; n.classList.toggle('warn', warn);
 }
-function showError(text) { remember('error', text); const e = $('error-message'); e.hidden = !text; e.textContent = text || ''; }
+function showError(text) { remember('error', text); const e = $('error-message'); e.hidden = !text; $('error-text').textContent = text || ''; }
 function download(blob, name) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = name;
@@ -72,6 +75,7 @@ function resetVideoState() {
 }
 
 function loadVideoFile(file) {
+  showError('');
   if (state.video?.blobUrl) URL.revokeObjectURL(state.video.blobUrl);
   const src = URL.createObjectURL(file);
   state.video = { name: file.name, size: file.size, src, blobUrl: src, remote: false, tainted: false };
@@ -82,7 +86,7 @@ function loadVideoFile(file) {
 }
 
 function loadVideoUrl(url, { sameOrigin = false } = {}) {
-  showError('');
+  showError(''); notice('');
   try {
     if (!sameOrigin && isYouTube(url)) {
       showError('YouTube pages cannot be used directly: the browser gets no access to the frames, and YouTube shows a 360° viewport rather than the equirectangular frame. Download the video file (for example with yt-dlp) and load it from disk, or use a direct link to an .mp4 / .webm file.');
@@ -119,7 +123,7 @@ video.addEventListener('error', () => {
 
 video.addEventListener('loadedmetadata', () => {
   const [vw, vh] = videoSize();
-  $('stage').style.setProperty('--aspect', String(vw / vh));
+  $('stage').style.setProperty('--aspect', String(state.view ? 16 / 9 : vw / vh));
   $('empty-state').hidden = true; $('stage-wrap').hidden = false;
   if (!state.projectionTouched) {
     const erp = Math.abs(vw / vh - 2) < 0.02;
@@ -271,18 +275,17 @@ function render() {
   const [W, H] = mapSize(state.display.mapWidth, state.settings, vw, vh);
   if (heatCanvas.width !== W || heatCanvas.height !== H) { heatCanvas.width = W; heatCanvas.height = H; }
   const hctx = heatCanvas.getContext('2d');
+  const thr = state.settings.coverageThreshold;
   let result = null;
+  const ref = state.ref ? referenceAt(k, W, H) : null;
+  if (!state.work.image || state.work.image.width !== W || state.work.image.height !== H) state.work.image = hctx.createImageData(W, H);
+  const img = state.work.image, colorOpts = { colormap: state.display.colormap, opacity: state.display.opacity, gamma: state.display.gamma, mode: state.display.mode };
+  img.data.fill(0);
   if (state.gaze) {
     const t0 = performance.now();
     result = renderMap(state.gaze, t, settingsForRender('max'), W, H, renderContext(), state.work);
     const ms = performance.now() - t0;
-    if (state.display.mode === 'off') hctx.clearRect(0, 0, W, H);
-    else {
-      if (!state.work.image || state.work.image.width !== W || state.work.image.height !== H) state.work.image = hctx.createImageData(W, H);
-      colorize(result.map, state.work.image.data, { colormap: state.display.colormap, opacity: state.display.opacity, gamma: state.display.gamma, mode: state.display.mode });
-      hctx.putImageData(state.work.image, 0, 0);
-    }
-    const cov = coverage(result.map, W, H, 0.1, state.settings.projection === 'erp');
+    const cov = coverage(result.map, W, H, thr, state.settings.projection === 'erp');
     const observers = new Set();
     for (let i = 0; i < result.points.n; i++) observers.add(result.points.obs[i]);
     $('ro-points').textContent = result.points.n.toLocaleString();
@@ -292,10 +295,152 @@ function render() {
     $('ro-ms').textContent = `${ms.toFixed(1)} ms per frame`;
     $('readout-badge').hidden = false;
     $('readout-badge').textContent = `σ ${state.settings.sigmaDeg}° · ±${state.settings.windowSec} s${state.settings.causal ? ' past' : ''}${state.settings.motionComp && state.flow ? ' · motion-comp.' : ''}`;
-  } else hctx.clearRect(0, 0, W, H);
+  }
+  if (state.display.mode !== 'off') {
+    if (ref && state.refDisplay === 'heat') colorize(normalised(ref.map), img.data, colorOpts);
+    else if (result) colorize(result.map, img.data, colorOpts);
+  }
+  const outlines = state.ref && state.refDisplay === 'contours';
+  if (outlines && ref) outline(ref.map, W, H, thr, [255, 255, 255], img.data, state.settings.projection === 'erp');
+  if ((outlines || state.display.outline) && result && result.max > 0) outline(result.map, W, H, thr, [200, 245, 106], img.data, state.settings.projection === 'erp');
+  hctx.putImageData(img, 0, 0);
+  updateReferenceReadout(ref, result);
   state.last = { t, k, result, W, H };
   drawMarks(t, result);
   drawPlayhead();
+  if (state.view) draw360(result, W, H);
+}
+
+function normalised(map) {
+  let mx = 0;
+  for (const v of map) if (v > mx) mx = v;
+  if (!(mx > 0)) return map;
+  const out = new Float32Array(map.length);
+  for (let i = 0; i < map.length; i++) out[i] = map[i] / mx;
+  return out;
+}
+/** Paint the border of the area at or above frac × max (two pixels wide; wraps left/right for 360° maps). */
+function outline(map, W, H, frac, rgb, data, wrap) {
+  let mx = 0;
+  for (const v of map) if (v > mx) mx = v;
+  if (!(mx > 0)) return;
+  const t = frac * mx, inside = (x, y) => {
+    if (y < 0 || y >= H) return false;
+    if (x < 0 || x >= W) { if (!wrap) return false; x = (x + W) % W; }
+    return map[y * W + x] >= t;
+  };
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const a = inside(x, y);
+    if (a === inside(x + 1, y) && a === inside(x, y + 1) && a === inside(x - 1, y) && a === inside(x, y - 1)) continue;
+    const j = 4 * (y * W + x);
+    data[j] = rgb[0]; data[j + 1] = rgb[1]; data[j + 2] = rgb[2]; data[j + 3] = 255;
+  }
+}
+
+// ---------- reference maps ----------
+/** The reference map for video frame k at W×H, from the cache; starts loading it if needed (then redraws). */
+function referenceAt(k, W, H) {
+  const R = state.ref;
+  const idx = R.N === 1 ? 0 : Math.round(k * R.scale) + R.offset;
+  if (idx < 0 || idx >= R.N) { R.status = `video frame ${k} → reference frame ${idx}: outside 0–${R.N - 1}`; return null; }
+  const key = `${idx}:${W}x${H}`;
+  if (R.cache.has(key)) { const map = R.cache.get(key); R.status = ''; R.shown = { idx, map, W, H }; return { idx, map, fresh: true }; }
+  if (!R.pending.has(idx)) {
+    R.pending.add(idx);
+    R.frame(idx).then(raw => {
+      R.cache.set(key, resample(raw, R.W, R.H, W, H));
+      while (R.cache.size > 24) R.cache.delete(R.cache.keys().next().value);
+    }).catch(e => { R.error = `frame ${idx}: ${e.message}`; remember('reference error', R.error); })
+      .finally(() => { R.pending.delete(idx); if (state.ref === R) requestRender(); });
+  }
+  R.status = `loading reference frame ${idx}…`;
+  // meanwhile keep showing the last frame that was ready (marked as not current)
+  return R.shown && R.shown.W === W && R.shown.H === H ? { idx: R.shown.idx, map: R.shown.map, fresh: false } : null;
+}
+function updateReferenceReadout(ref, result) {
+  const R = state.ref;
+  $('ro-ref-card').hidden = !R;
+  if (!R) return;
+  $('ref-status').textContent = R.error ? `Error: ${R.error}` : R.status || (ref ? `Showing reference frame ${ref.idx}.` : '');
+  if (!ref) { $('ro-ref').textContent = '—'; $('ro-ref-detail').textContent = R.status || 'no reference for this frame'; return; }
+  const thr = state.settings.coverageThreshold;
+  if (result && result.max > 0) {
+    const c = compareMaps(result.map, ref.map, thr);
+    $('ro-ref').textContent = `CC ${fmt(c.cc, 3)} · overlap ${pct(c.iou)}`;
+    $('ro-ref-detail').textContent = `reference frame ${ref.idx}${ref.fresh ? '' : ' (loading the current one)'}, its coverage ${pct(c.coverageB)}`;
+  } else {
+    const c = compareMaps(ref.map, ref.map, thr);
+    $('ro-ref').textContent = `coverage ${pct(c.coverageA)}`;
+    $('ro-ref-detail').textContent = `reference frame ${ref.idx}${ref.fresh ? '' : ' (loading)'}; no gaze map to compare`;
+  }
+}
+async function loadReference(files) {
+  try {
+    const R = await openReference(files);
+    Object.assign(R, { cache: new Map(), pending: new Set(), offset: R.suggestedOffset, scale: 1, status: '', error: '', shown: null });
+    state.ref = R;
+    $('ref-name').textContent = R.name; $('ref-name').title = R.name;
+    $('ref-size').textContent = `${R.N} × ${R.W} × ${R.H}${R.kind === 'bin' ? ' float32' : ''}`;
+    $('ref-offset').value = String(R.offset); $('ref-scale').value = '1'; $('clear-ref').disabled = false;
+    const vFrames = video.duration ? Math.round(video.duration * state.fps) : 0;
+    const msgs = [`Reference loaded: ${R.name}.`];
+    if (R.kind === 'bin') msgs.push('Salient360 maps: frame offset +1 (bin frame 0 is empty, bin frame k belongs to video frame k − 1).');
+    if (R.N > 1 && vFrames && Math.abs(R.N - vFrames) > 2) msgs.push(`It has ${R.N} frames and the video about ${vFrames}: set “Ref. frames per video frame” (e.g. ${fmt(R.N / vFrames, 3)}) or the offset if they do not line up.`);
+    notice(msgs.join(' '), R.N > 1 && vFrames && Math.abs(R.N - vFrames) > 2);
+    requestRender();
+  } catch (e) { notice(`Could not open the reference: ${e.message}`, true); }
+}
+$('choose-ref').addEventListener('click', () => $('ref-input').click());
+$('ref-input').addEventListener('change', e => { if (e.target.files.length) loadReference([...e.target.files]); e.target.value = ''; });
+$('clear-ref').addEventListener('click', () => { state.ref = null; $('ref-name').textContent = $('ref-size').textContent = '—'; $('ref-status').textContent = 'No reference loaded.'; $('clear-ref').disabled = true; requestRender(); });
+$('ref-offset').addEventListener('change', e => { if (state.ref) { state.ref.offset = Math.round(Number(e.target.value) || 0); requestRender(); } });
+$('ref-scale').addEventListener('change', e => { if (state.ref) { state.ref.scale = Math.max(0.001, Number(e.target.value) || 1); requestRender(); } });
+$('ref-display').addEventListener('change', e => { state.refDisplay = e.target.value; requestRender(); });
+$('cov-thr').addEventListener('change', e => {
+  state.settings.coverageThreshold = Math.min(0.99, Math.max(0.001, Number(e.target.value) || 0.1));
+  $('ro-coverage-label').textContent = `COVERAGE ≥ ${state.settings.coverageThreshold} MAX`;
+  onSettings();
+});
+
+// ---------- 360° view ----------
+const glCanvas = $('view360-canvas');
+function set360(on) {
+  if (on && !state.view) {
+    try { state.view = state.view360 || (state.view360 = new View360(glCanvas)); }
+    catch (e) { showError(`The 360° view needs WebGL2: ${e.message}`); return; }
+    state.viewSource ||= document.createElement('canvas');
+  } else if (!on) state.view = null;
+  glCanvas.hidden = !on; $('view360-bar').hidden = !on; $('view-360').classList.toggle('active', on);
+  const [vw, vh] = videoSize();
+  $('stage').style.setProperty('--aspect', String(on ? 16 / 9 : vw / vh));
+  requestRender();
+}
+function draw360(result, W, H) {
+  const v = state.view, src = state.viewSource;
+  const [vw, vh] = videoSize(), sw = Math.min(vw, 2048), sh = Math.round(sw / 2);
+  if (src.width !== sw || src.height !== sh) { src.width = sw; src.height = sh; }
+  drawComposite(src);
+  if ($('view360-follow').checked && result && result.max > 0) {
+    let a = 0;
+    for (let i = 1; i < result.map.length; i++) if (result.map[i] > result.map[a]) a = i;
+    v.follow(((a % W + 0.5) / W - 0.5) * 360, (0.5 - (Math.floor(a / W) + 0.5) / H) * 180, video.paused ? 1 : 0.12);
+  }
+  v.setSource(src); v.draw();
+  $('view360-info').textContent = `looking at ${Math.round(v.yaw)}°, ${Math.round(v.pitch)}° · field of view ${Math.round(v.fov)}°`;
+}
+function redraw360() { if (state.view) { state.view.draw(); $('view360-info').textContent = `looking at ${Math.round(state.view.yaw)}°, ${Math.round(state.view.pitch)}° · field of view ${Math.round(state.view.fov)}°`; } }
+$('view-360').addEventListener('click', () => set360(!state.view));
+{
+  let drag = null;
+  glCanvas.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY }; glCanvas.setPointerCapture(e.pointerId); });
+  glCanvas.addEventListener('pointermove', e => {
+    if (!drag || !state.view) return;
+    state.view.drag(e.clientX - drag.x, e.clientY - drag.y); drag = { x: e.clientX, y: e.clientY };
+    $('view360-follow').checked = false; redraw360();
+  });
+  glCanvas.addEventListener('pointerup', () => { drag = null; });
+  glCanvas.addEventListener('wheel', e => { if (!state.view) return; e.preventDefault(); state.view.zoom(Math.exp(e.deltaY * 0.001)); redraw360(); }, { passive: false });
+  glCanvas.addEventListener('dblclick', () => { if (!state.view) return; Object.assign(state.view, { yaw: 0, pitch: 0, fov: 90 }); redraw360(); });
 }
 
 function drawMarks(t, result) {
@@ -407,20 +552,34 @@ async function loadGazeFiles(list) {
   }
   setStatus(state.video ? 'Video ready' : 'Gaze loaded');
   if (!parsed.length) { notice(`Could not read the gaze files. ${failed.slice(0, 3).join(' ')}`, true); return; }
-  // Keep files whose columns match the first one; report the rest.
-  const ref = parsed[0].table.columns.join('|');
+  // Files with the same columns as those already loaded are added to them (one column mapping serves all);
+  // a different format replaces them. Within a batch, files whose columns differ from the first one are skipped.
+  const current = state.files.length ? state.files[0].table.columns.join('|') : null;
+  const ref = current && parsed.some(p => p.table.columns.join('|') === current) ? current : parsed[0].table.columns.join('|');
   const same = parsed.filter(p => p.table.columns.join('|') === ref);
   const other = parsed.filter(p => p.table.columns.join('|') !== ref);
-  state.files = same;
+  const adding = current === ref;
+  let added = same, replacedNote = '';
+  if (adding) {
+    const have = new Set(state.files.map(f => f.path || f.name));
+    added = same.filter(f => !have.has(f.path || f.name));
+    state.files = state.files.concat(added);
+  } else {
+    if (current) replacedNote = `These files have other columns than the ${state.files.length} loaded before, so they replace them.`;
+    state.files = same; state.removedObservers = new Set();
+  }
   state.loadReport = { chosen, read: files.length, filter: note, failed, otherColumns: other.map(o => ({ path: o.path, columns: o.table.columns })) };
-  state.mapping = detectMapping(same[0].table, { duration: video.duration || 60, width: video.videoWidth || 0, height: video.videoHeight || 0 });
-  if (same.length === 1 && state.mapping.observerFrom === 'file') state.mapping.observerFrom = 'none';
-  const folders = new Set(same.map(f => f.folder));
-  if (state.mapping.conditionFrom === 'none' && folders.size > 1 && !state.mapping.preset) state.mapping.conditionFrom = 'folder';
-  const presetNote = applyDatasetDefaults(state.mapping);
+  let presetNote = '';
+  if (!adding) {
+    state.mapping = detectMapping(same[0].table, { duration: video.duration || 60, width: video.videoWidth || 0, height: video.videoHeight || 0 });
+    if (same.length === 1 && state.mapping.observerFrom === 'file') { state.mapping.observerFrom = 'none'; state.mapping.observerAuto = true; }
+    const folders = new Set(same.map(f => f.folder));
+    if (state.mapping.conditionFrom === 'none' && folders.size > 1 && !state.mapping.preset) state.mapping.conditionFrom = 'folder';
+    presetNote = applyDatasetDefaults(state.mapping);
+  } else if (state.mapping.observerAuto && state.files.length > 1) { state.mapping.observerFrom = 'file'; state.mapping.observerAuto = false; }
   populateMappingForm();
   rebuildGaze();
-  const msgs = [note, presetNote].filter(Boolean);
+  const msgs = [note, adding ? `Added ${added.length} file(s)${added.length < same.length ? ` (${same.length - added.length} were loaded already)` : ''}; ${state.files.length} in total.` : '', replacedNote, presetNote].filter(Boolean);
   if (other.length) msgs.push(`${other.length} file(s) with different columns were skipped (${other.slice(0, 2).map(o => o.name).join(', ')}…).`);
   if (failed.length) msgs.push(`${failed.length} file(s) could not be read.`);
   notice(msgs.join(' '), other.length > 0 || failed.length > 0);
@@ -507,7 +666,10 @@ function rebuildGaze() {
   try {
     const prevObs = state.gaze ? new Map(state.gaze.observers.map((o, i) => [o, state.observerEnabled[i]])) : null;
     const prevCond = state.gaze ? new Map(state.gaze.conditions.map((c, i) => [c, state.conditionEnabled[i]])) : null;
-    state.gazeAll = buildGaze(state.files, state.mapping, { fps: state.fps });
+    const built = buildGaze(state.files, state.mapping, { fps: state.fps });
+    const removed = new Set(built.observers.map((o, i) => state.removedObservers?.has(o) ? i : -1).filter(i => i >= 0));
+    state.gazeAll = dropObservers(built, removed);
+    state.gazeAll.skipped = built.skipped;
     state.gaze = velocityFilter(state.gazeAll, state.settings.velocity);
     state.observerEnabled = Uint8Array.from(state.gaze.observers, o => prevObs?.has(o) ? prevObs.get(o) : 1);
     state.conditionEnabled = Uint8Array.from(state.gaze.conditions, c => prevCond?.has(c) ? prevCond.get(c) : 1);
@@ -539,8 +701,23 @@ function renderGroups() {
     ? g.conditions.map((c, i) => `<label class="chip"><input type="checkbox" data-cond="${i}" ${state.conditionEnabled[i] ? 'checked' : ''}>${escapeHtml(c)} <small>${condCounts[i]}</small></label>`).join('')
     : '';
   $('observer-count').textContent = `${g.observers.length} observer${g.observers.length === 1 ? '' : 's'}`;
-  $('observer-list').innerHTML = g.observers.map((o, i) => `<label class="observer-row"><input type="checkbox" data-obs="${i}" ${state.observerEnabled[i] ? 'checked' : ''}><i style="background:${obsColor(i)}"></i><span title="${escapeHtml(o)}">${escapeHtml(o)}</span><small>${obsCounts[i]}</small></label>`).join('');
+  const removed = state.removedObservers || new Set();
+  $('observer-count').textContent = `${g.observers.length - removed.size} observer${g.observers.length - removed.size === 1 ? '' : 's'}${removed.size ? ` (${removed.size} removed)` : ''}`;
+  $('observer-list').innerHTML = g.observers.map((o, i) => removed.has(o) ? '' : `<div class="observer-row"><label><input type="checkbox" data-obs="${i}" ${state.observerEnabled[i] ? 'checked' : ''}><i style="background:${obsColor(i)}"></i><span title="${escapeHtml(o)}">${escapeHtml(o)}</span><small>${obsCounts[i]}</small></label><button class="row-remove" type="button" data-remove="${i}" title="Remove ${escapeHtml(o)}" aria-label="Remove ${escapeHtml(o)}">×</button></div>`).join('')
+    + (removed.size ? `<button id="restore-observers" class="link-button" type="button">bring back the ${removed.size} removed</button>` : '');
 }
+$('observer-list').addEventListener('click', e => {
+  const r = e.target.closest('[data-remove]');
+  if (r) { (state.removedObservers ||= new Set()).add(state.gaze.observers[Number(r.dataset.remove)]); rebuildGaze(); return; }
+  if (e.target.id === 'restore-observers') { state.removedObservers = new Set(); rebuildGaze(); }
+});
+function clearGaze() {
+  Object.assign(state, { files: [], mapping: null, gazeAll: null, gaze: null, observerEnabled: null, conditionEnabled: null, removedObservers: new Set(), loadReport: null });
+  $('mapping-section').hidden = true; $('mapping-error').hidden = true;
+  renderGroups(); updateGazeSummary(); drawDensity(); updateSubtitle(); updateButtons(); updateExportSummary(); requestRender();
+  notice('Gaze cleared.');
+}
+$('clear-gaze').addEventListener('click', clearGaze);
 $('observer-list').addEventListener('change', e => { const i = e.target.dataset.obs; if (i == null) return; state.observerEnabled[i] = e.target.checked ? 1 : 0; drawDensity(); requestRender(); });
 $('condition-list').addEventListener('change', e => { const i = e.target.dataset.cond; if (i == null) return; state.conditionEnabled[i] = e.target.checked ? 1 : 0; drawDensity(); requestRender(); });
 $('obs-all').addEventListener('click', () => { if (!state.gaze) return; state.observerEnabled.fill(1); renderGroups(); drawDensity(); requestRender(); });
@@ -652,7 +829,7 @@ function bindPair(rangeId, numId, apply) {
 bindPair('sigma', 'sigma-num', v => { state.settings.sigmaDeg = Math.max(0.05, v); onSettings(); });
 bindPair('window', 'window-num', v => { state.settings.windowSec = Math.max(0, v); onSettings(); });
 bindPair('lon-offset', 'lon-offset-num', v => { state.settings.lonOffsetDeg = v; onSettings(); });
-$('projection').addEventListener('change', e => { state.projectionTouched = true; state.settings.projection = e.target.value; $('fov-row').hidden = e.target.value !== 'planar'; updateSubtitle(); onSettings(); });
+$('projection').addEventListener('change', e => { state.projectionTouched = true; state.settings.projection = e.target.value; $('fov-row').hidden = e.target.value !== 'planar'; updateSubtitle(); updateButtons(); onSettings(); });
 $('fov').addEventListener('change', e => { state.settings.planarFovDeg = Math.max(1, Number(e.target.value) || 90); onSettings(); });
 $('kernel').addEventListener('change', e => { state.settings.kernel = e.target.value; onSettings(); });
 $('causal').addEventListener('change', e => { state.settings.causal = e.target.checked; onSettings(); });
@@ -670,6 +847,7 @@ $('color-ramp').style.background = cssGradient('jet');
 $('opacity').addEventListener('input', e => { state.display.opacity = Number(e.target.value) / 100; $('opacity-value').textContent = `${e.target.value}%`; requestRender(); });
 $('gamma').addEventListener('input', e => { state.display.gamma = Number(e.target.value); $('gamma-value').textContent = Number(e.target.value).toFixed(2); requestRender(); });
 $('map-width').addEventListener('change', e => { state.display.mapWidth = Number(e.target.value); requestRender(); });
+$('show-outline').addEventListener('change', e => { state.display.outline = e.target.checked; requestRender(); });
 $('show-points').addEventListener('change', e => { state.display.showPoints = e.target.checked; requestRender(); });
 $('speed').addEventListener('change', e => { video.playbackRate = Number(e.target.value); });
 function onSettings() { updateExportSummary(); requestRender(); }
@@ -793,12 +971,18 @@ function debugReport() {
     if (!$('mapping-error').hidden) L.push(`  MAPPING ERROR: ${$('mapping-error').textContent}`);
     if (g) L.push(`  ${state.gazeAll.n} rows read, ${g.n} kept${g.filtered ? ` (${g.filtered} dropped by the speed filter)` : ''}, ${state.gazeAll.skipped || 0} rows without valid time or position, ${g.observers.length} observers, ${g.conditions.length} conditions (${g.conditions.join(', ')}), time ${fmt(g.tMin, 3)}–${fmt(g.tMax, 3)} s`);
   }
+  if (state.removedObservers?.size) L.push(`  removed observers: ${[...state.removedObservers].join(', ')}`);
+  L.push('', 'REFERENCE');
+  if (!state.ref) L.push('  none');
+  else L.push(`  ${state.ref.name}: ${state.ref.kind}, ${state.ref.N} frame(s) of ${state.ref.W} × ${state.ref.H}, offset ${state.ref.offset}, rate ${state.ref.scale}, showing ${state.refDisplay}`,
+    `  ${$('ro-ref').textContent} — ${$('ro-ref-detail').textContent}${state.ref.error ? ' — ERROR ' + state.ref.error : ''}`);
+  L.push('', '360° VIEW', state.view ? `  on, yaw ${fmt(state.view.yaw, 1)}°, pitch ${fmt(state.view.pitch, 1)}°, field of view ${fmt(state.view.fov, 0)}°` : '  off');
   L.push('', 'SETTINGS', '  ' + JSON.stringify(state.settings));
   L.push('', 'MOTION', `  ${state.flow ? $('flow-status').textContent : 'not analysed'}${state.flowInfo ? ' ' + JSON.stringify(state.flowInfo) : ''}`);
   if (state.last?.result) L.push('', 'CURRENT FRAME', `  frame ${state.last.k}, ${state.last.result.points.n} points, map ${state.last.W} × ${state.last.H}, coverage ${$('ro-coverage').textContent}`);
   L.push('', 'ON SCREEN', `  status: ${$('status').textContent}`);
-  if (!$('error-message').hidden) L.push(`  error: ${$('error-message').textContent}`);
-  if (!$('notice').hidden) L.push(`  notice: ${$('notice').textContent}`);
+  if (!$('error-message').hidden) L.push(`  error: ${$('error-text').textContent}`);
+  if (!$('notice').hidden) L.push(`  notice: ${$('notice-text').textContent}`);
   L.push('', 'MESSAGES AND ERRORS (oldest first)', ...(debugLog.length ? debugLog.map(x => '  ' + x) : ['  none']));
   return L.join('\n') + '\n';
 }
@@ -922,7 +1106,7 @@ function compositeCanvas(maxWidth = 3840) {
 function drawComposite(c) {
   const g = c.getContext('2d');
   g.drawImage(video, 0, 0, c.width, c.height);
-  if (state.display.mode !== 'off' && state.gaze) { g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high'; g.drawImage(heatCanvas, 0, 0, c.width, c.height); }
+  if (state.display.mode !== 'off' || state.display.outline || (state.ref && state.refDisplay === 'contours')) { g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high'; g.drawImage(heatCanvas, 0, 0, c.width, c.height); }
   g.drawImage(marksCanvas, 0, 0, c.width, c.height);
 }
 $('export-snapshot').addEventListener('click', () => {
@@ -975,6 +1159,8 @@ function updateButtons() {
   $('export-snapshot').disabled = !readable;
   $('export-video').disabled = !readable;
   $('export-gaze').disabled = !hasGaze;
+  $('view-360').disabled = !readable || state.settings.projection !== 'erp';
+  if (state.view && $('view-360').disabled) set360(false);
 }
 
 // ---------- file inputs, drag and drop, sample, URL parameters ----------
@@ -1059,3 +1245,4 @@ $('empty-sample').addEventListener('click', () => loadSample('erp'));
 })();
 updateButtons(); updateExportSummary();
 Object.assign(window.overgaze, { render, exportMaps });
+document.addEventListener('click', e => { const d = e.target.closest('[data-dismiss]'); if (d) $(d.dataset.dismiss).hidden = true; });

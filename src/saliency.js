@@ -30,7 +30,8 @@ export const DEFAULTS = Object.freeze({
   durationWeight: false,    // weight each fixation by its duration
   motionComp: false,        // warp pooled gaze along optical flow into the current frame
   lonOffsetDeg: 0, flipX: false, flipY: false, // orientation fixes applied to the gaze
-  normalize: 'max'          // 'max' (divide by frame max) | 'sum' (probability map) | 'none'
+  normalize: 'max',         // 'max' (divide by frame max) | 'sum' (probability map) | 'none'
+  coverageThreshold: 0.1    // coverage = share of the frame at or above this fraction of the frame maximum
 });
 
 /** Frame index ↔ frame-centre time. Frame k covers [k/fps, (k+1)/fps); its centre is used for pooling. */

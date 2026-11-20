@@ -224,3 +224,43 @@ test('YT360 per-frame files (Fixation_per_video) take the frame from the file na
   assert.equal(g.observers.length, 1, 'no observer ids in these files');
   assert.throws(() => buildGaze([{ table: t, name: 'frame.txt' }], m, { fps: 25 }), /no number/);
 });
+
+// ---------- Salient360, observer removal, reference maps ----------
+import { dropObservers } from '../src/gaze.js';
+import { compareMaps, parseNpyHeader, resample } from '../src/reference.js';
+
+test('Salient360 fixation files: comment header, observers where the index restarts, end frame included', () => {
+  const csv = '# Idx, longitude, latitude, start timestamp, duration, start frame, end frame\n0,0.25,0.5,0,300,1,8\n1,0.5,0.5,400,200,11,15\n0,0.75,0.25,0,100,1,3\n';
+  const t = parseTable(csv, '1_PortoRiverside_fixations.csv');
+  assert.equal(t.preset, 's360');
+  const m = detectMapping(t, {});
+  const g = buildGaze([{ table: t, name: '1_PortoRiverside_fixations.csv', folder: 'L' }], m, { fps: 25 });
+  assert.equal(g.observers.length, 2, 'index 0 again = next observer');
+  close(g.t0[0], 0.5 / 25, 1e-9, 'frame 1 = first video frame');
+  close(g.t1[0], 8 / 25, 1e-9, 'end frame 8 included: runs to the end of video frame 7');
+  const i = [...g.lon].findIndex(l => Math.abs(l - Math.PI / 2) < 1e-9);
+  close(g.lat[i], Math.PI / 4, 1e-9, 'latitude 0.25 from the top is above the equator');
+});
+
+test('removing an observer drops its rows only', () => {
+  const g = packRecords([[0, 0, 0, 0, 0, 0, 1], [0, 0, 0, 0, 1, 0, 1], [1, 1, 0, 0, 1, 0, 1]], ['a', 'b'], ['c']);
+  const h = dropObservers(g, new Set([1]));
+  assert.equal(h.n, 1); assert.equal(h.removed, 2); assert.deepEqual(h.observers, ['a', 'b']);
+  assert.throws(() => dropObservers(g, new Set([0, 1])), /All observers/);
+});
+
+test('reference helpers: npy header, resampling and map comparison', () => {
+  const hdr = "{'descr': '<f2', 'fortran_order': False, 'shape': (500, 64, 128), }";
+  const pad = 128 - 10 - hdr.length - 1, text = hdr + ' '.repeat(pad) + '\n';
+  const buf = new Uint8Array(10 + text.length);
+  buf.set([0x93, 78, 85, 77, 80, 89, 1, 0]); new DataView(buf.buffer).setUint16(8, text.length, true);
+  buf.set(new TextEncoder().encode(text), 10);
+  const h = parseNpyHeader(buf.buffer);
+  assert.equal(h.descr, '<f2'); assert.deepEqual(h.shape, [500, 64, 128]); assert.equal(h.offset, 128);
+  const src = Float32Array.from({ length: 16 }, (_, i) => i);           // 4 × 4
+  assert.deepEqual([...resample(src, 4, 4, 2, 2)], [2.5, 4.5, 10.5, 12.5], 'area average when shrinking');
+  assert.equal(resample(src, 4, 4, 8, 8).length, 64);
+  const a = Float32Array.from([0, 1, 2, 3]);
+  const c = compareMaps(a, a, 0.5);
+  close(c.cc, 1, 1e-9); assert.equal(c.iou, 1); assert.equal(c.coverageA, 0.5);
+});

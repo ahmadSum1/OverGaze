@@ -98,3 +98,51 @@ test('choosing a whole VR-EyeTracking-style folder keeps only the files of the l
     assert.deepEqual(b.logs, []);
   } finally { b.close(); server.close(); }
 });
+
+test('gaze files add up, observers can be removed, messages can be dismissed, a reference map is compared, 360° view draws', opts, async () => {
+  const { server, url } = await serve(), b = await launch();
+  const dir = mkdtempSync(join(tmpdir(), 'overgaze-more-'));
+  try {
+    const csv = 'user,start_time,duration,longitude,latitude\n';
+    writeFileSync(join(dir, 'a.csv'), csv + '1,1.0,2.0,0.5,0.5\n2,1.0,2.0,0.5,0.5\n');
+    writeFileSync(join(dir, 'b.csv'), csv + '3,1.0,2.0,0.25,0.5\n');
+    // reference: .npy float32 (2, 64, 128) with a peak where the gaze is (frame centre)
+    const hdr = "{'descr': '<f4', 'fortran_order': False, 'shape': (2, 64, 128), }", text = hdr + ' '.repeat(128 - 11 - hdr.length) + '\n';
+    const data = new Float32Array(2 * 64 * 128);
+    for (let k = 0; k < 2; k++) for (let y = 0; y < 64; y++) for (let x = 0; x < 128; x++) data[k * 8192 + y * 128 + x] = Math.exp(-((x - 63.5) ** 2 + (y - 31.5) ** 2) / 8);
+    const npy = new Uint8Array(10 + text.length + data.byteLength);
+    npy.set([0x93, 78, 85, 77, 80, 89, 1, 0]); new DataView(npy.buffer).setUint16(8, text.length, true);
+    npy.set(new TextEncoder().encode(text), 10); npy.set(new Uint8Array(data.buffer), 10 + text.length);
+    writeFileSync(join(dir, 'ref.npy'), npy);
+
+    await b.goto(url);
+    await b.setFiles('#video-input', [join(ROOT, 'sample', 'sample_erp.mp4')]);
+    await b.waitFor('overgaze.state.fpsSource === "measured"', 20000, 'video');
+    await b.setFiles('#gaze-input', [join(dir, 'a.csv')]);
+    await b.waitFor('!!overgaze.state.gaze', 10000);
+    await b.setFiles('#gaze-input', [join(dir, 'b.csv')]);
+    await b.waitFor('overgaze.state.files.length === 2', 10000, 'second file added');
+    assert.equal(await b.eval('overgaze.state.gaze.observers.length'), 3);
+    await b.click('[data-remove="2"]');
+    await b.waitFor('overgaze.state.gaze.n === 2', 5000, 'observer removed');
+    assert.match(await b.eval('document.querySelector("#observer-count").textContent'), /1 removed/);
+    await b.click('#notice .dismiss');
+    assert.equal(await b.eval('document.querySelector("#notice").hidden'), true);
+
+    // reference with the default 0 offset: video frame 0 ↔ reference frame 0; then offset −45 puts frame 0 at video frame 45 (1.5 s)
+    await b.setFiles('#ref-input', [join(dir, 'ref.npy')]);
+    await b.waitFor('!!overgaze.state.ref', 5000);
+    await b.eval('document.querySelector("#video").currentTime = 0.01; 1');
+    await b.waitFor('document.querySelector("#ro-ref-detail").textContent.includes("reference frame 0")', 10000, 'reference readout');
+    await b.eval('overgaze.applySettings({ sigmaDeg: 5.6 }); document.querySelector("#ref-offset").value = "-45"; document.querySelector("#ref-offset").dispatchEvent(new Event("change")); document.querySelector("#video").currentTime = 1.51; 1');
+    await b.waitFor('/CC (0\\.9|1\\.0)/.test(document.querySelector("#ro-ref").textContent)', 10000, 'high correlation with a matching reference').catch(async e => { console.log(await b.eval('document.querySelector("#ro-ref").textContent + " | " + document.querySelector("#ro-ref-detail").textContent + " | " + document.querySelector("#time-label").textContent')); throw e; });
+
+    await b.click('#view-360');
+    await b.waitFor('!document.querySelector("#view360-canvas").hidden', 3000);
+    const px = await b.eval('(()=>{const c=document.querySelector("#view360-canvas");const g=c.getContext("webgl2");const p=new Uint8Array(4);g.readPixels(c.width>>1,c.height>>1,1,1,g.RGBA,g.UNSIGNED_BYTE,p);return [c.width,p[3]]})()');
+    assert.ok(px[0] > 100 && px[1] === 255, `360° view drew something: ${px}`);
+    await b.click('#clear-gaze');
+    assert.equal(await b.eval('overgaze.state.gaze'), null);
+    assert.deepEqual(b.logs.filter(l => !/WebGL|GPU stall|swiftshader/i.test(l)), []);
+  } finally { b.close(); server.close(); }
+});

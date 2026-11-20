@@ -10,7 +10,10 @@ export function parseTable(text, name = '') {
   if (!trimmed) throw new Error(`${name || 'File'} is empty.`);
   if (/\.json$/i.test(name) || trimmed[0] === '[' || trimmed[0] === '{') return parseJsonTable(trimmed, name);
   if (/^@relation/im.test(trimmed.slice(0, 4000)) || /\.arff$/i.test(name)) return parseArff(trimmed);
+  // Salient360 video fixations: the header is a comment line "# Idx, longitude, latitude, start timestamp, …".
+  const s360 = /^#\s*Idx\s*,\s*longitude\s*,\s*latitude\s*,\s*start timestamp/i.test(trimmed);
   const lines = trimmed.split(/\r?\n/).filter(line => line.trim() && !/^\s*(#|%|\/\/)/.test(line));
+  if (s360) return { columns: ['idx', 'longitude', 'latitude', 'start_ms', 'duration_ms', 'start_frame', 'end_frame'], rows: lines.map(l => l.split(',').map(c => c.trim())), preset: 's360' };
   // VR-EyeTracking raw gaze: "frame,<n>,forward,<head x>,<head y>,eye,<gaze x>,<gaze y>" with label words in the rows.
   if (/^frame\s*,\s*\d+\s*,\s*forward\s*,/i.test(lines[0])) {
     const rows = lines.map(l => l.split(',').map(c => c.trim())).filter(r => r.length >= 8).map(r => [r[1], r[3], r[4], r[6], r[7]]);
@@ -113,6 +116,15 @@ const PATTERNS = {
 
 /** Guess a column mapping from header names and value ranges. Everything can be edited in the UI. */
 export function detectMapping(table, context = {}) {
+  if (table.preset === 's360') {
+    // Salient360 videos: positions are 0–1 from the top-left; frames are 1-based player frames (end frame included);
+    // the index restarts at 0 for each observer. Align by frames, not timestamps (playback lag was logged per frame).
+    return {
+      time: 'start_frame', timeUnit: 'frame1', end: 'end_frame', duration: '', durationUnit: 'frame1', x: 'longitude', y: 'latitude', z: '',
+      coord: 'normalized', xLeft: 0, xRight: 1, yTop: 0, yBottom: 1,
+      observerFrom: 'restart', observer: 'idx', conditionFrom: 'folder', condition: '', weight: '', timeOffset: 0, preset: 's360'
+    };
+  }
   if (table.preset === 'vret') {
     // Positions are fractions of the panorama from the BOTTOM-LEFT corner; one gaze sample per video frame, numbered from 1.
     return {
@@ -279,13 +291,19 @@ export function buildGaze(files, mapping, context = {}) {
     if ((it < 0 && mapping.time !== FILE_TIME) || ix < 0 || iy < 0) throw new Error(`${file.name}: time, x and y columns are required (missing ${[it < 0 && 'time', ix < 0 && 'x', iy < 0 && 'y'].filter(Boolean).join(', ')}).`);
     if (mapping.coord === 'vector' && iz < 0) throw new Error(`${file.name}: 3D direction needs a z column.`);
     const stem = file.name.replace(/\.[^.]+$/, '');
+    let run = 0, prevCounter = Infinity;
     for (const row of file.table.rows) {
+      if (mapping.observerFrom === 'restart' && io >= 0) {   // a counter column that starts again for each observer
+        const c = Number(row[io]);
+        if (Number.isFinite(c)) { if (c <= prevCounter && prevCounter !== Infinity) run++; prevCounter = c; }
+      }
       const t = mapping.time === FILE_TIME ? fileTime : Number(row[it]), x = Number(row[ix]), y = Number(row[iy]);
       if (!Number.isFinite(t) || !Number.isFinite(x) || !Number.isFinite(y)) { skipped++; continue; }
       const t0 = secs(t, mapping.timeUnit) + (Number(mapping.timeOffset) || 0);
       let t1 = t0;
       if (id >= 0 && Number.isFinite(Number(row[id]))) t1 = t0 + Math.max(0, durSecs(Number(row[id]), mapping.durationUnit || mapping.timeUnit, fps));
-      else if (ie >= 0 && Number.isFinite(Number(row[ie]))) t1 = Math.max(t0, secs(Number(row[ie]), mapping.timeUnit) + (Number(mapping.timeOffset) || 0));
+      // an end given as a frame number includes that frame: the interval runs to the end of it
+      else if (ie >= 0 && Number.isFinite(Number(row[ie]))) t1 = Math.max(t0, secs(Number(row[ie]), mapping.timeUnit) + (/^frame/.test(mapping.timeUnit) ? 0.5 / fps : 0) + (Number(mapping.timeOffset) || 0));
       let lonlat;
       if (mapping.coord === 'vector') {
         const z = Number(row[iz]);
@@ -294,6 +312,7 @@ export function buildGaze(files, mapping, context = {}) {
       } else lonlat = toLonLat(x, y, mapping);
       if (!lonlat) { skipped++; continue; }
       const observerKey = mapping.observerFrom === 'column' && io >= 0 ? String(row[io]) : mapping.observerFrom === 'file' ? stem
+        : mapping.observerFrom === 'restart' ? `${stem}#${String(run + 1).padStart(2, '0')}`
         : mapping.observerFrom === 'folder' ? (file.folder || stem) : 'all';
       const conditionKey = mapping.conditionFrom === 'column' && ic >= 0 ? String(row[ic])
         : mapping.conditionFrom === 'folder' ? (file.folder || '(root)')
@@ -328,6 +347,17 @@ export function packRecords(records, observers, conditions, skipped = 0) {
   });
   g.hasDuration = g.maxDur > 0;
   return g;
+}
+
+/** The same gaze set without the given observers (by index); observer and condition lists stay as they are. */
+export function dropObservers(g, removed) {
+  if (!removed || !removed.size) return g;
+  const records = [];
+  for (let i = 0; i < g.n; i++) if (!removed.has(g.obs[i])) records.push([g.t0[i], g.t1[i], g.lon[i], g.lat[i], g.obs[i], g.cond[i], g.w[i]]);
+  if (!records.length) throw new Error('All observers were removed.');
+  const out = packRecords(records, g.observers, g.conditions, g.skipped);
+  out.removed = g.n - records.length;
+  return out;
 }
 
 /** Map table x, y to (lon, lat) radians using the linear ranges in the mapping. */

@@ -55,6 +55,7 @@
         <div class="url-row"><input id="gaze-url" type="url" placeholder="https://…/fixations.csv"><button id="load-gaze-url" class="button button-outline" type="button">Open</button></div>
         <label class="input-label" for="gaze-filter">ONLY FILES WHOSE PATH CONTAINS (OPTIONAL)</label>
         <input id="gaze-filter" type="text" placeholder="default: files that belong to the loaded video" autocomplete="off">
+        <div class="list-head"><span>Load files adds to what is loaded.</span><button id="clear-gaze" class="link-button" type="button" title="Remove all loaded gaze files">clear all</button></div>
         <p id="gaze-summary" class="hint">No gaze loaded. One file per observer, or one file with an observer column.</p>
       </section>
 
@@ -92,6 +93,20 @@
         <div class="list-head"><span id="observer-count">0 observers</span><span><button id="obs-all" class="link-button" type="button">all</button> · <button id="obs-none" class="link-button" type="button">none</button></span></div>
         <div id="observer-list" class="observer-list"></div>
       </section>
+      <section id="reference-section" class="side-section">
+        <div class="section-title"><span class="section-icon">◧</span> Reference maps <span class="section-number">E</span></div>
+        <p class="hint">Ground-truth maps to compare with: a Salient360 <code>.bin</code>, a <code>.npy</code> (frames, height, width), one image, or one image per frame.</p>
+        <div class="button-row"><button id="choose-ref" class="button button-outline" type="button">◧ Load reference</button><button id="clear-ref" class="button button-outline" type="button" disabled>Clear</button></div>
+        <input id="ref-input" type="file" accept=".bin,.npy,image/*" multiple hidden>
+        <dl class="details compact"><div><dt>File</dt><dd id="ref-name">—</dd></div><div><dt>Frames</dt><dd id="ref-size">—</dd></div></dl>
+        <div class="grid2">
+          <label>Frame offset<input id="ref-offset" type="number" step="1" value="0" title="reference frame = video frame × rate + offset"></label>
+          <label>Ref. frames per video frame<input id="ref-scale" type="number" step="0.01" min="0.01" value="1"></label>
+        </div>
+        <label class="input-label" for="ref-display">SHOW</label>
+        <div class="select-wrap"><select id="ref-display"><option value="contours">Outlines: reference white, ours lime</option><option value="heat">Reference heatmap (instead of ours)</option><option value="off">Nothing (numbers only)</option></select></div>
+        <p id="ref-status" class="hint">No reference loaded.</p>
+      </section>
       <div class="sidebar-footer"><div class="shortcut-icon">⌘</div><div><strong>Made for visual checking</strong><span>Your files never leave your device.</span></div></div>
     </aside>
 
@@ -99,7 +114,7 @@
       <div class="workspace-header"><div><div class="breadcrumb">WORKSPACE <span>/</span> <strong>GAZE OVERLAY</strong></div><h1>See where people look<span class="accent">.</span></h1><p>Turn fixations into saliency, tune it live, export the maps.</p></div><div class="workspace-header-right"><span class="status-dot"></span> <span id="status">Ready</span></div></div>
 
       <div class="viewer-card">
-        <div class="viewer-toolbar"><div class="viewer-title"><span class="viewer-icon">◉</span><div><strong id="viewer-name">Canvas</strong><span id="viewer-subtitle">Load a video and gaze data</span></div></div><div class="toolbar-right"><span id="readout-badge" class="dimension-badge" hidden></span><span class="live-badge"><span></span> LIVE OVERLAY</span></div></div>
+        <div class="viewer-toolbar"><div class="viewer-title"><span class="viewer-icon">◉</span><div><strong id="viewer-name">Canvas</strong><span id="viewer-subtitle">Load a video and gaze data</span></div></div><div class="toolbar-right"><span id="readout-badge" class="dimension-badge" hidden></span><button id="view-360" class="button button-outline small" type="button" title="Look around inside the 360° video, like a 360° player" disabled>360° view</button><span class="live-badge"><span></span> LIVE OVERLAY</span></div></div>
         <div id="drop-zone" class="canvas-area">
           <div id="empty-state" class="empty-state">
             <div class="empty-art" aria-hidden="true"><div class="art-layer art-layer-back"></div><div class="art-layer art-layer-middle"></div><div class="art-layer art-layer-front"><span>◉</span></div><i class="art-spark art-spark-one">✳</i><i class="art-spark art-spark-two">✦</i></div>
@@ -114,9 +129,11 @@
               <video id="video" playsinline muted preload="auto"></video>
               <canvas id="heat-canvas"></canvas>
               <canvas id="marks-canvas"></canvas>
+              <canvas id="view360-canvas" hidden></canvas>
             </div>
+            <div id="view360-bar" class="view360-bar" hidden><span>drag to look around · wheel to zoom · double-click to reset</span><label><input id="view360-follow" type="checkbox"> follow the gaze</label><span id="view360-info"></span></div>
           </div>
-          <div id="error-message" class="error-message" role="alert" hidden></div>
+          <div id="error-message" class="error-message" role="alert" hidden><span id="error-text"></span><button class="dismiss" type="button" data-dismiss="error-message" aria-label="Dismiss" title="Dismiss">×</button></div>
         </div>
         <div class="transport">
           <button id="play" class="nav-button play-button" type="button" aria-label="Play" disabled>▶</button>
@@ -130,13 +147,14 @@
           <select id="speed" aria-label="Playback speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
         </div>
       </div>
-      <div id="notice" class="notice" role="status" hidden></div>
+      <div id="notice" class="notice" role="status" hidden><span id="notice-text"></span><button class="dismiss" type="button" data-dismiss="notice" aria-label="Dismiss" title="Dismiss">×</button></div>
 
       <div class="readouts">
         <div><span>POINTS IN WINDOW</span><strong id="ro-points">—</strong></div>
         <div><span>OBSERVERS</span><strong id="ro-observers">—</strong></div>
-        <div><span>COVERAGE ≥ 0.1 MAX</span><strong id="ro-coverage">—</strong><small>pixels / sphere area</small></div>
+        <div><span id="ro-coverage-label">COVERAGE ≥ 0.1 MAX</span><strong id="ro-coverage">—</strong><small>pixels / sphere area</small></div>
         <div><span>MAP</span><strong id="ro-map">—</strong><small id="ro-ms">—</small></div>
+        <div id="ro-ref-card" hidden><span>VS REFERENCE</span><strong id="ro-ref">—</strong><small id="ro-ref-detail">—</small></div>
       </div>
     </section>
 
@@ -199,6 +217,8 @@
         <div class="setting-row"><label for="gamma">Gamma</label><output id="gamma-value">1.00</output></div>
         <input id="gamma" type="range" min="0.2" max="3" step="0.05" value="1">
         <div class="setting-row"><label for="map-width">Live map width</label><select id="map-width" class="num-select"><option value="256">256</option><option value="512" selected>512</option><option value="1024">1024</option></select></div>
+        <div class="setting-row"><label for="cov-thr">Coverage threshold (× frame max)</label><input id="cov-thr" class="num" type="number" min="0.01" max="0.99" step="0.01" value="0.1"></div>
+        <label class="view-switch"><span>Outline the coverage area</span><input id="show-outline" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
         <label class="view-switch"><span>Show gaze points</span><input id="show-points" type="checkbox" role="switch" checked><span class="switch-track" aria-hidden="true"></span></label>
       </div>
 

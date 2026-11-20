@@ -34,7 +34,7 @@ The address bar can open data and set options: `?sample` or `?sample=2d` load a 
 - **Horizontal / vertical** position as normalised 0–1, degrees, radians or pixels. The four "value at edge" fields define the linear mapping to the frame (longitude −180…180 or 0…360, latitude 90 at the top or 0 at the top, y from the bottom …). A **3D direction** option (x right, y up, z forward) is also available.
 - **Observer** from a column, the file name, the folder name or none; **condition** from a column, the folder name, the folder above it, the file name or none.
 
-### The two datasets this was built for
+### The datasets this was built for
 
 Both are recognised on sight; their usual settings are filled in and written in the notice under the video.
 
@@ -43,9 +43,31 @@ Both are recognised on sight; their usual settings are filled in and written in 
 
 - **YT360 per-frame files** (`Fixation_per_video/<condition>/<video id>-<start>/00000037.txt`, one file per frame with `eye_rect_x`, `eye_rect_y`, no times, no observers) also work: the frame number is taken from the file name. Rows with `nan` (the eye tracker lost the eye) are skipped and counted. Choose a clip folder, not the whole `Fixation_per_video` folder (428,520 files). `Fixation_per_user_per_video` is the better source: it has observers and fixation durations.
 
+- **Salient360 videos** (`Video_HE/HE/Scanpaths/{L,R}/<n>_<Name>_fixations.csv`, header in a `#` comment line: index, longitude, latitude, start time, duration, start frame, end frame). Frames are used, not timestamps (the player logged its lag per frame); frame numbers start at 1 and the end frame is included; a new observer starts wherever the index goes back to 0 (51–56 per eye); the eye folder (L / R) is the condition. Choose the `Scanpaths` folder after loading `<n>_<Name>.mp4`.
+
 The box **Only files whose path contains** overrides the automatic choice of files.
 
+**Load files** and **Load folder** add to what is loaded when the new files have the same columns (one column mapping serves them all; files loaded twice are skipped); files of another format replace the loaded ones. **clear all** removes every gaze file. In the observer list, × removes one observer (with one observer per file, that file) and *bring back* restores them. Notices and errors close with their ×, and loading another video clears the old error.
+
 **Something wrong?** **Copy debug details** (in the export panel and the help menu) copies a plain-text report: browser and the video codecs it can play, the video (size, frame rate, errors), every gaze file used with its row count, files that could not be read or had other columns, the column mapping and any mapping error, settings, motion analysis, and every notice and error so far. Paste it into a message or bug report.
+
+## Reference maps
+
+**Load reference** in panel E opens ground-truth maps to compare with, read frame by frame from disk (multi-gigabyte files are fine):
+
+- a Salient360 `.bin` sequence (`<n>_<Name>_<width>x<height>x<frames>_32b.bin`, raw float32); the frame offset is set to +1 because bin frame 0 is empty and bin frame k belongs to video frame k − 1,
+- a `.npy` array (frames, height, width) or (height, width), float16 / 32 / 64 or uint8, such as the `sal.npy` of the pooled training maps,
+- one image (a static map such as `<n>_<Name>_saliency.png`) or one image per frame (ordered by the number in the name).
+
+Reference frame = video frame × *ref. frames per video frame* + *frame offset*. **Show**: outlines of the area at or above the coverage threshold (reference white, ours lime), the reference heatmap instead of ours, or nothing. The readout **vs reference** gives the correlation of the two maps (CC), the overlap of the two thresholded areas (intersection over union) and the reference's coverage. The **coverage threshold** (display panel, default 0.1 × frame maximum) applies to the outlines, the coverage readout and the coverage written into `frames.csv`; **Outline the coverage area** draws our outline without a reference.
+
+Check: Salient360 `1_PortoRiverside` with both eyes' fixations, σ 2°, window 0, against its `.bin`: CC 1.000 and overlap 98.5 % at 3, 8 and 12.5 s, i.e. the frame alignment and the Gaussian match the dataset's own maps.
+
+## 360° view
+
+**360° view** (above the video, for 360° videos whose pixels can be read) shows a perspective view from inside the sphere, like the 360° players of YouTube or VLC, with the heatmap, outlines and gaze points on it. Drag to look around, use the wheel to zoom (field of view 25–130°), double-click to reset. **follow the gaze** turns the view towards the maximum of the current map, smoothly while playing. Exports are unchanged (equirectangular).
+
+![360° view](docs/screenshots/11-360-view.png)
 
 ## Settings
 
@@ -123,4 +145,4 @@ python3 tools/make_sample_2d.py  # regenerate the 2D sample (ffmpeg)
 
 The unit tests cover parsing and mapping (including the VR-EyeTracking and YT360 formats), the sphere Gaussian, pooling (Gaussian weights, fixations over frames), the speed filter, optical flow, motion-compensated pooling, frame-rate estimation and the ZIP / NPY / PNG writers. The browser tests start a small static server and a headless Chrome (`tools/cdp.mjs`, no dependencies, Node 22+ for the built-in WebSocket) and check: the sample loads with a clean console and draws the heatmap, `file://` shows the warning, motion compensation shrinks the pooled map, the export ZIP is complete, and a VR-EyeTracking-style folder is filtered and read correctly. Set `CHROME=/path/to/chrome` to choose the browser.
 
-`src/` holds `gaze.js` (parsing and coordinates), `saliency.js` (pooling and Gaussians), `flow.js` (optical flow and the flow store), `timing.js` (frame rate), `export.js` (writers), `colormap.js`, the two workers and `app.js` (interface). `window.overgaze` exposes the state, `applySettings(...)` and `mapAt(frame, width)` (the raw map the export would write) for tests and the console.
+`src/` holds `gaze.js` (parsing and coordinates), `saliency.js` (pooling and Gaussians), `flow.js` (optical flow and the flow store), `timing.js` (frame rate), `reference.js` (reference maps), `view360.js` (WebGL 360° view), `export.js` (writers), `colormap.js`, the two workers and `app.js` (interface). `window.overgaze` exposes the state, `applySettings(...)` and `mapAt(frame, width)` (the raw map the export would write) for tests and the console.
