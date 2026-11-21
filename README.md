@@ -59,7 +59,9 @@ The box **Only files whose path contains** overrides the automatic choice of fil
 - a `.npy` array (frames, height, width) or (height, width), float16 / 32 / 64 or uint8, such as the `sal.npy` of the pooled training maps,
 - one image (a static map such as `<n>_<Name>_saliency.png`) or one image per frame (ordered by the number in the name).
 
-Reference frame = video frame × *ref. frames per video frame* + *frame offset*. Switches: **Reference heatmap** (its own layer under ours, in its own colours, “ice” by default) and **Outlines** of the area at or above the coverage threshold (reference white, ours lime). The **Gaze** and **Reference** buttons above the video switch our layer (heatmap, points, outline) and the reference heatmap on and off, so either can be seen alone or both together. The readout **vs reference** gives the correlation of the two maps (CC), the overlap of the two thresholded areas (intersection over union) and the reference's coverage. The **coverage threshold** (display panel, default 0.1 × frame maximum) applies to the outlines, the coverage readout and the coverage written into `frames.csv`; **Outline the coverage area** draws our outline without a reference.
+Reference frame = video frame × *ref. frames per video frame* + *frame offset*. Right after loading, every reference frame is read once in the background, starting at the playhead, and kept small in memory (at most 512 × 256, one byte per value plus the frame maximum: 79 MB for 600 frames); the status line shows the progress (a 4.9 GB Salient360 `.bin` took 25 s). From then on the reference follows playback frame by frame. Frames not prepared yet are read on demand and the newest ready one is shown; **Hold the video for the reference** pauses playback until the current reference frame is there, so video and reference stay together at the cost of speed.
+
+Salient360 note: several of its videos (2_Diner, 5_Waterpark, 8_Sofa, 10_Cows, 18_Bar …) are stored as 3840 × 1920 with non-square pixels, so the browser shows them as 3840 × 2048 or 3840 × 2160. The picture is still the whole sphere, only stretched, and the overlay is stretched with it, so nothing shifts: on 5_Waterpark the map from the fixation files matches the `.bin` at CC 1.000 with 97–98 % overlap. Loading a Salient360 `.bin` also sets the projection to 360°. Switches: **Reference heatmap** (its own layer under ours, in its own colours, “ice” by default) and **Outlines** of the area at or above the coverage threshold (reference white, ours lime). The **Gaze** and **Reference** buttons above the video switch our layer (heatmap, points, outline) and the reference heatmap on and off, so either can be seen alone or both together. The readout **vs reference** gives the correlation of the two maps (CC), the overlap of the two thresholded areas (intersection over union) and the reference's coverage. The **coverage threshold** (display panel, default 0.1 × frame maximum) applies to the outlines, the coverage readout and the coverage written into `frames.csv`; **Outline the coverage area** draws our outline without a reference.
 
 Check: Salient360 `1_PortoRiverside` with both eyes' fixations, σ 2°, window 0, against its `.bin`: CC 1.000 and overlap 98.5 % at 3, 8 and 12.5 s, i.e. the frame alignment and the Gaussian match the dataset's own maps.
 
@@ -69,24 +71,30 @@ Check: Salient360 `1_PortoRiverside` with both eyes' fixations, σ 2°, window 0
 
 | layout | frame | guessed from the shape |
 |---|---|---|
-| Equirectangular | 2:1 (also stretched 16:9 full-sphere videos) | 2:1 and anything not listed below |
+| Equirectangular | 2:1 (also stretched 16:9 full-sphere videos) | 2:1 and anything not listed below; shapes from 1.86:1 to 2.15:1 (e.g. 3840 × 2048) also set the projection to 360° |
 | Equirectangular, stereo top-bottom | top half used | 1:1 |
 | Equirectangular, stereo side by side | left half used | 4:1 |
 | Cubemap 3 × 2 | faces right, left, up / down, front, back | — (3:2 is taken as the next one) |
 | Cube strip 6 × 1 and 1 × 6 | same face order in one row or column | 6:1, 1:6 |
 | Equi-angular cubemap 3 × 2 (YouTube) | left, front, right / down, back, up (bottom row turned), 2-pixel padding | 3:2 |
+| Cylindrical panorama | picture wrapped on a cylinder: across = angle, up = height on the cylinder (tan of the elevation); black above and below | wider than 2.2:1 (except 4:1 and 6:1) |
 
-The cube layouts follow ffmpeg's `v360` filter (default face order and rotation), which is how such files are usually made: unfolding ffmpeg's cubemap and equi-angular cubemap output gives exactly ffmpeg's own equirectangular result (`tools/fit_cube_faces.mjs` fits the face table; a browser test checks both against the original). A YouTube equi-angular cubemap download (YT360 `AnfsPA5FXh4-1215`, 3840 × 2160) unfolds without seams, with the fixations on the people and the crossing. Choose the layout by hand when the shape is ambiguous: 16:9 files can be stretched equirectangular (most YT360 clips) or equi-angular cubemap (that one).
+For the cube layouts, **Face order** gives the faces tile by tile from the top left (R L U D F B = right, left, up, down, front, back; default RLUDFB) and **Mirror faces** mirrors each face, like `cubemapOrder` and `cubemapFlipX` in egjs-view360. For a cylindrical panorama, **Horizontal coverage** (default 360°) says how far around the picture reaches; the vertical field of view follows from the shape, 2·atan(π·height / width) for a full turn (115° for 2:1).
 
-**360° view** (above the video, for 360° videos whose pixels can be read) shows the frame from inside the sphere with the heatmap, outlines and gaze points on it:
+The cube layouts follow ffmpeg's `v360` filter (default face order and rotation), which is how such files are usually made: unfolding ffmpeg's cubemap and equi-angular cubemap output gives exactly ffmpeg's own equirectangular result (`tools/fit_cube_faces.mjs` fits the face table). The cylindrical mapping matches ffmpeg's `cylindrical` output to within rounding (mean error 0.2 of 255). A browser test makes cubemap (default and LRDUBF face order), equi-angular cubemap and cylindrical videos of the sample with ffmpeg and checks that each unfolds to the original frame. A YouTube equi-angular cubemap download (YT360 `AnfsPA5FXh4-1215`, 3840 × 2160) unfolds without seams, with the fixations on the people and the crossing. Choose the layout by hand when the shape is ambiguous: 16:9 files can be stretched equirectangular (most YT360 clips) or equi-angular cubemap (that one).
+
+**360° view** (above the video, for videos whose pixels can be read; it treats the frame as equirectangular) shows the frame from inside the sphere with the heatmap, outlines and gaze points on it:
 
 - **Perspective**, like the 360° players of YouTube or VLC (field of view 25–130°),
 - **Little planet** (stereographic projection looking down, up to 330°),
 - **Fisheye** (equidistant, up to 360°).
+- **Unfolded**: the whole sphere laid out as a **cubemap 3 × 2**, an **equi-angular cubemap** or a **cylinder** (360° around, ±57.5° up and down), with the overlay on it; dragging turns the sphere. These match ffmpeg's conversions of the same frame (correlation 0.99; 0.94 for the equi-angular cubemap, where ffmpeg adds a 2-pixel border).
+
+The view menu sets how the frame is *shown*; how the video file *stores* the picture is set by **Video layout** in panel A.
 
 Drag to look around, use the wheel to zoom, double-click to reset. **follow the gaze** turns the view towards the maximum of the current map, smoothly while playing. Exports stay equirectangular.
 
-The list of layouts and views is modelled on [egjs-view360](https://github.com/naver/egjs-view360) by NAVER (MIT licence): its equirectangular, stereo equirectangular, cubemap, cube strip and equi-angular cubemap projections and its little-planet view. OverGaze does not include its code; the shaders are written for OverGaze.
+The list of layouts and views is modelled on [egjs-view360](https://github.com/naver/egjs-view360) by NAVER (MIT licence): its equirectangular, stereo equirectangular, cubemap (with face order and mirroring), cube strip, equi-angular cubemap and cylindrical projections and its little-planet view. OverGaze does not include its code; the shaders are written for OverGaze.
 
 ![360° view](docs/screenshots/11-360-view.png)
 
@@ -151,9 +159,9 @@ The readout under the video shows the points in the window, the observers that c
 
 ![2D video](docs/screenshots/09-2d-video.png)
 
-## Keyboard
+## Keyboard and mouse
 
-Space: play / pause. Left / right: one frame. Shift + left / right: one second. M: motion compensation on / off. P: gaze points on / off.
+Click on the video: play / pause (in the 360° view a click, not a drag; a double-click resets the view). ⟳ next to the frame buttons (or L): start again at the end. Space: play / pause. Left / right: one frame. Shift + left / right: one second. M: motion compensation on / off. P: gaze points on / off.
 
 ## Development
 

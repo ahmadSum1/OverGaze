@@ -275,3 +275,19 @@ test('video layouts: cube faces and the padded equi-angular cubemap land where f
   assert.deepEqual(erpSize('eac', 3072, 2048), [4096, 2048]); assert.deepEqual(erpSize('erp-tb', 3840, 3840), [3840, 1920]);
   const back = dirToUV('erp', uvToDir(0.3, 0.7)); close(back[0], 0.3, 1e-9); close(back[1], 0.7, 1e-9);
 });
+
+test('cylindrical panoramas and cube face orders', async () => {
+  const { dirToUV, erpSize, faceTables } = await import('../src/projections.js');
+  const o = { hfov: 360 };
+  assert.deepEqual(dirToUV('cyl', [0, 0, 1], undefined, [1024, 512], o), [0.5, 0.5]);
+  // the top edge of a full 360° panorama of 1024 × 512 is at elevation atan(π·512/1024 / 2·…) = atan(π/2)
+  const top = Math.atan(Math.PI / 2);
+  const p = dirToUV('cyl', [0, Math.sin(top) * 0.999, Math.cos(top)], undefined, [1024, 512], o);
+  assert.ok(p && p[1] < 0.01, `just inside the top edge: ${p}`);
+  assert.equal(dirToUV('cyl', [0, 1, 0.1], undefined, [1024, 512], o), null, 'straight up is outside the cylinder');
+  assert.equal(dirToUV('cyl', [0, 0, -1], undefined, [1024, 512], { hfov: 180 }), null, 'behind a 180° panorama');
+  assert.deepEqual(erpSize('cyl', 1800, 400, { hfov: 180 }), [3600, 1800]);
+  const t = faceTables({ order: 'LRDUBF', mirror: true });
+  assert.deepEqual(t.c3x2.l, [0, 0, 1]); assert.deepEqual(t.c3x2.f, [5, 0, 1]);
+  assert.throws(() => faceTables({ order: 'RRUDFB' }), /each of R L U D F B/);
+});

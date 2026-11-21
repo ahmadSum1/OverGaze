@@ -1,7 +1,8 @@
 // Video layouts for 360° footage: where a viewing direction lands in the video frame.
 // The list follows the projection types of egjs-view360 (NAVER, MIT licence, https://github.com/naver/egjs-view360):
-// equirectangular, stereo equirectangular (top-bottom / left-right), cubemap (3 × 2, cube strips 6 × 1 and 1 × 6)
-// and the equi-angular cubemap of YouTube. The code here is our own; the face tables were fitted to ffmpeg's
+// equirectangular, stereo equirectangular (top-bottom / left-right), cubemap (3 × 2, cube strips 6 × 1 and 1 × 6,
+// with face order and mirroring like its cubemapOrder / cubemapFlipX),
+// the equi-angular cubemap of YouTube, and cylindrical panoramas. The code here is our own; the face tables were fitted to ffmpeg's
 // v360 filter (default face order "rludfb", no face rotation), which is how such files are usually made.
 //
 // Directions: x right, y up, z forward (centre of an equirectangular frame); lon = atan2(x, z), lat = asin(y).
@@ -13,8 +14,23 @@ export const LAYOUTS = {
   c3x2: { label: 'Cubemap 3 × 2', cols: 3, rows: 2 },
   c6x1: { label: 'Cube strip 6 × 1', cols: 6, rows: 1 },
   c1x6: { label: 'Cube strip 1 × 6', cols: 1, rows: 6 },
-  eac: { label: 'Equi-angular cubemap 3 × 2 (YouTube)', cols: 3, rows: 2, equiAngular: true }
+  eac: { label: 'Equi-angular cubemap 3 × 2 (YouTube)', cols: 3, rows: 2, equiAngular: true },
+  cyl: { label: 'Cylindrical panorama' }
 };
+export const CUBE_LAYOUTS = ['c3x2', 'c6x1', 'c1x6'];
+
+/** Layout options: cube face order (letters r l u d f b, tile by tile as in egjs-view360's cubemapOrder) and
+ *  mirrored faces (its cubemapFlipX); horizontal coverage of a cylindrical panorama in degrees (360 = all around). */
+export const DEFAULT_OPTIONS = Object.freeze({ order: 'rludfb', mirror: false, hfov: 360 });
+
+/** Face tables for the given options (the equi-angular cubemap keeps YouTube's fixed arrangement). */
+export function faceTables(opts = DEFAULT_OPTIONS) {
+  const order = String(opts.order || 'rludfb').toLowerCase();
+  if (order.length !== 6 || [...'rludfb'].some(k => !order.includes(k))) throw new Error(`Face order “${opts.order}” must hold each of R L U D F B once.`);
+  const out = { eac: FACE_TABLES.eac };
+  for (const l of CUBE_LAYOUTS) out[l] = Object.fromEntries([...order].map((k, i) => [k, [i, 0, opts.mirror ? 1 : 0]]));
+  return out;
+}
 
 // Cube faces seen from inside: centre direction, and the directions of +s (right) and +t (up) on the face.
 export const FACES = {
@@ -38,9 +54,10 @@ export const FACE_TABLES = {
 };
 
 /** Size of the equirectangular frame that a video of this layout holds. */
-export function erpSize(layout, w, h) {
+export function erpSize(layout, w, h, opts = DEFAULT_OPTIONS) {
   const L = LAYOUTS[layout];
   if (!L || layout === 'erp') return [w, h];
+  if (layout === 'cyl') { const W = Math.round(w * 360 / Math.max(1, Math.min(360, opts.hfov || 360))); return [W, Math.round(W / 2)]; }
   if (layout === 'erp-tb') return [w, Math.round(h / 2)];
   if (layout === 'erp-lr') return [Math.round(w / 2), h];
   const face = Math.min(w / L.cols, h / L.rows);
@@ -48,8 +65,17 @@ export function erpSize(layout, w, h) {
 }
 
 /** Texture coordinates (u right, v down, 0–1) in a frame of this layout for direction d (need not be unit). */
-export function dirToUV(layout, d, tables = FACE_TABLES, size = [3072, 2048]) {
+export function dirToUV(layout, d, tables = FACE_TABLES, size = [3072, 2048], opts = DEFAULT_OPTIONS) {
   const [x, y, z] = d;
+  if (layout === 'cyl') {
+    // The picture is wrapped on a cylinder around the viewer: x is the angle, y the height on the cylinder
+    // (tan of the elevation). Its radius in pixels is width / horizontal coverage, so the vertical field of view
+    // follows from the shape: 2·atan(π·height / width) for a full 360° panorama. Outside the picture: null.
+    const hf = Math.max(1, Math.min(360, opts.hfov || 360)) * Math.PI / 180, lon = Math.atan2(x, z);
+    if (Math.abs(lon) > hf / 2) return null;
+    const v = 0.5 - (y / Math.hypot(x, z)) * (size[0] / hf) / size[1];
+    return v < 0 || v > 1 ? null : [lon / hf + 0.5, v];
+  }
   if (layout === 'erp' || layout === 'erp-tb' || layout === 'erp-lr') {
     const r = Math.hypot(x, y, z);
     let u = Math.atan2(x, z) / (2 * Math.PI) + 0.5, v = 0.5 - Math.asin(y / r) / Math.PI;
@@ -89,7 +115,13 @@ export function glslLayout(tables = FACE_TABLES) {
 const float PI = 3.141592653589793;
 const int LAYOUT_ERP = ${ids.indexOf('erp')}, LAYOUT_TB = ${ids.indexOf('erp-tb')}, LAYOUT_LR = ${ids.indexOf('erp-lr')};
 ${['c3x2', 'c6x1', 'c1x6', 'eac'].map(l => `const int T_${l}[6] = int[6](${arr(l, 0)}); const int R_${l}[6] = int[6](${arr(l, 1)}); const int F_${l}[6] = int[6](${arr(l, 2)});`).join('\n')}
-vec2 layoutUV(int lay, vec3 d, vec2 size) {
+vec2 layoutUV(int lay, vec3 d, vec2 size, float hfov) {
+  if (lay == ${ids.indexOf('cyl')}) {                     // cylindrical panorama; (-1, -1) = outside the picture
+    float lon = atan(d.x, d.z);
+    if (abs(lon) > hfov * 0.5) return vec2(-1.0);
+    float v = 0.5 - (d.y / length(d.xz)) * (size.x / hfov) / size.y;
+    return v < 0.0 || v > 1.0 ? vec2(-1.0) : vec2(lon / hfov + 0.5, v);
+  }
   if (lay == LAYOUT_ERP || lay == LAYOUT_TB || lay == LAYOUT_LR) {
     vec2 uv = vec2(atan(d.x, d.z) / (2.0 * PI) + 0.5, 0.5 - asin(clamp(normalize(d).y, -1.0, 1.0)) / PI);
     if (lay == LAYOUT_TB) uv.y *= 0.5;
