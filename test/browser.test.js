@@ -150,6 +150,19 @@ test('gaze files add up, observers can be removed, messages can be dismissed, a 
     await b.eval('overgaze.applySettings({ sigmaDeg: 5.6 }); document.querySelector("#ref-offset").value = "-45"; document.querySelector("#ref-offset").dispatchEvent(new Event("change")); document.querySelector("#video").currentTime = 1.51; 1');
     await b.waitFor('/CC (0\\.9|1\\.0)/.test(document.querySelector("#ro-ref").textContent)', 10000, 'high correlation with a matching reference').catch(async e => { console.log(await b.eval('document.querySelector("#ro-ref").textContent + " | " + document.querySelector("#ro-ref-detail").textContent + " | " + document.querySelector("#time-label").textContent')); throw e; });
 
+    // the two outlines: separate switches and colours
+    const count = '(rgb => { const c = document.querySelector("#heat-canvas"), d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] === rgb[0] && d[i + 1] === rgb[1] && d[i + 2] === rgb[2] && d[i + 3] === 255) n++; return n; })';
+    const setColor = (id, v) => b.eval(`document.querySelector('#${id}').value = '${v}'; document.querySelector('#${id}').dispatchEvent(new Event('input')); overgaze.render(); 1`);
+    await setColor('ref-outline-color', '#ff00ff'); await setColor('outline-color', '#00ffff');
+    assert.ok(await b.eval(`${count}([255, 0, 255])`) > 10, 'reference outline in its colour');
+    assert.ok(await b.eval(`${count}([0, 255, 255])`) > 10, 'our outline (switched on with the reference) in its colour');
+    await b.eval(`document.querySelector('#show-outline').click(); overgaze.render(); 1`);
+    assert.equal(await b.eval(`${count}([0, 255, 255])`), 0, 'our outline off');
+    assert.ok(await b.eval(`${count}([255, 0, 255])`) > 10, 'the reference outline stays');
+    await b.eval(`document.querySelector('#ref-outline').click(); document.querySelector('#show-outline').click(); overgaze.render(); 1`);
+    assert.equal(await b.eval(`${count}([255, 0, 255])`), 0, 'reference outline off');
+    assert.ok(await b.eval(`${count}([0, 255, 255])`) > 10, 'ours alone');
+
     await b.click('#view-360');
     await b.waitFor('!document.querySelector("#view360-canvas").hidden', 3000);
     const px = await b.eval('(()=>{const c=document.querySelector("#view360-canvas");const g=c.getContext("webgl2");const p=new Uint8Array(4);g.readPixels(c.width>>1,c.height>>1,1,1,g.RGBA,g.UNSIGNED_BYTE,p);return [c.width,p[3]]})()');
@@ -163,7 +176,7 @@ test('gaze files add up, observers can be removed, messages can be dismissed, a 
     assert.equal(await b.eval('overgaze.state.showGaze'), false);
     await b.click('#clear-gaze');
     assert.equal(await b.eval('overgaze.state.gaze'), null);
-    assert.deepEqual(b.logs.filter(l => !/WebGL|GPU stall|swiftshader/i.test(l)), []);
+    assert.deepEqual(b.logs.filter(l => !/WebGL|GPU stall|swiftshader|willReadFrequently/i.test(l)), []);   // the last one comes from the test reading pixels
   } finally { b.close(); server.close(); }
 });
 

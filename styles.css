@@ -106,3 +106,4 @@ input[type=range]{accent-color:var(--lime);width:100%}
 .view360-bar{left:0;right:0;margin:0 auto;width:fit-content;transform:none}
 #loop.active{background:var(--lime);color:#11131a;border-color:var(--lime)}
 .video-list-row{display:flex;gap:6px;align-items:center;margin-top:10px}.video-list-row .select-wrap{flex:1;min-width:0}.video-list-row .nav-button{flex:none}
+.switch-color{display:flex;align-items:center;gap:8px}.switch-color .view-switch{flex:1}.switch-color input[type=color]{width:26px;height:22px;padding:0;border:1px solid #393d47;border-radius:4px;background:none;cursor:pointer;flex:none}

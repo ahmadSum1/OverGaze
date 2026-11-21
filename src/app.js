@@ -19,11 +19,11 @@ const state = {
   video: null, fps: 30, fpsSource: 'default', fpsDeltas: [], lastFrameMeta: null, mediaTime: 0,
   files: [], mapping: null, gazeAll: null, gaze: null, observerEnabled: null, conditionEnabled: null,
   settings: { ...DEFAULTS, velocity: 0 },
-  display: { mode: 'heat', colormap: 'jet', opacity: 0.65, gamma: 1, mapWidth: 512, showPoints: true, showFlow: false },
+  display: { outline: false, outlineColor: '#c8f56a', outlineTouched: false, mode: 'heat', colormap: 'jet', opacity: 0.65, gamma: 1, mapWidth: 512, showPoints: true, showFlow: false },
   flow: null, flowInfo: null, analysing: null, exporting: null, recording: null,
   work: {}, last: null, renderQueued: false, projectionTouched: false, density: null,
   library: { videos: [], gaze: [], refs: [] }, tiedTo: null,
-  ref: null, refShow: { heat: false, outline: true }, showGaze: true, removedObservers: new Set(), view: null,
+  ref: null, refShow: { heat: false, outline: true, outlineColor: '#ffffff' }, showGaze: true, removedObservers: new Set(), view: null,
   layout: 'erp', layoutTouched: false, layoutOpts: { ...DEFAULT_OPTIONS }, converter: null
 };
 
@@ -345,9 +345,11 @@ function render() {
     $('readout-badge').textContent = `σ ${state.settings.sigmaDeg}° · ±${state.settings.windowSec} s${state.settings.causal ? ' past' : ''}${state.settings.motionComp && state.flow ? ' · motion-comp.' : ''}`;
   }
   const wrapX = state.settings.projection === 'erp', refOutline = !!(state.ref && state.refShow.outline);
+  const rgb = hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
   if (state.showGaze && state.display.mode !== 'off' && result) colorize(result.map, img.data, colorOpts);
-  if (refOutline && ref) outline(ref.map, W, H, thr, [255, 255, 255], img.data, wrapX);
-  if (state.showGaze && (refOutline || state.display.outline) && result && result.max > 0) outline(result.map, W, H, thr, [200, 245, 106], img.data, wrapX);
+  // the two outlines are independent: each has its own switch and colour
+  if (refOutline && ref) outline(ref.map, W, H, thr, rgb(state.refShow.outlineColor), img.data, wrapX);
+  if (state.showGaze && state.display.outline && result && result.max > 0) outline(result.map, W, H, thr, rgb(state.display.outlineColor), img.data, wrapX);
   hctx.putImageData(img, 0, 0);
   // the reference heatmap has its own layer (under ours) and its own colours
   const rctx = refCanvas.getContext('2d');
@@ -466,6 +468,7 @@ async function loadReference(files) {
     if (R.N > 1 && vFrames && Math.abs(R.N - vFrames) > 2) msgs.push(`It has ${R.N} frames and the video about ${vFrames}: set “Ref. frames per video frame” (e.g. ${fmt(R.N / vFrames, 3)}) or the offset if they do not line up.`);
     notice(msgs.join(' '), R.N > 1 && vFrames && Math.abs(R.N - vFrames) > 2);
     R.hold = $('ref-hold').checked;
+    if (!state.display.outlineTouched) { state.display.outline = true; $('show-outline').checked = true; }   // ours next to the reference's, to compare
     requestRender();
     prepareReference(R);
   } catch (e) { notice(`Could not open the reference: ${e.message}`, true); }
@@ -547,6 +550,8 @@ $('ref-offset').addEventListener('change', e => { if (state.ref) { state.ref.off
 $('ref-scale').addEventListener('change', e => { if (state.ref) { state.ref.scale = Math.max(0.001, Number(e.target.value) || 1); requestRender(); } });
 $('ref-heat').addEventListener('change', e => { state.refShow.heat = e.target.checked; syncLayerChips(); requestRender(); });
 $('ref-outline').addEventListener('change', e => { state.refShow.outline = e.target.checked; requestRender(); });
+$('ref-outline-color').addEventListener('input', e => { state.refShow.outlineColor = e.target.value; requestRender(); });
+$('outline-color').addEventListener('input', e => { state.display.outlineColor = e.target.value; requestRender(); });
 $('ref-colormap').innerHTML = COLORMAPS.map(c => `<option value="${c}">${c[0].toUpperCase() + c.slice(1)}</option>`).join('');
 $('ref-colormap').value = 'ice';
 $('ref-colormap').addEventListener('change', e => { state.refColormap = e.target.value; requestRender(); });
@@ -1030,7 +1035,7 @@ $('color-ramp').style.background = cssGradient('jet');
 $('opacity').addEventListener('input', e => { state.display.opacity = Number(e.target.value) / 100; $('opacity-value').textContent = `${e.target.value}%`; requestRender(); });
 $('gamma').addEventListener('input', e => { state.display.gamma = Number(e.target.value); $('gamma-value').textContent = Number(e.target.value).toFixed(2); requestRender(); });
 $('map-width').addEventListener('change', e => { state.display.mapWidth = Number(e.target.value); requestRender(); });
-$('show-outline').addEventListener('change', e => { state.display.outline = e.target.checked; requestRender(); });
+$('show-outline').addEventListener('change', e => { state.display.outline = e.target.checked; state.display.outlineTouched = true; requestRender(); });
 $('show-points').addEventListener('change', e => { state.display.showPoints = e.target.checked; requestRender(); });
 $('speed').addEventListener('change', e => { video.playbackRate = Number(e.target.value); });
 function onSettings() { updateExportSummary(); requestRender(); }
