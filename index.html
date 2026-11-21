@@ -42,7 +42,8 @@
 
       <section class="side-section">
         <div class="section-title"><span class="section-icon">▶</span> Video <span class="section-number">A</span></div>
-        <div class="button-row"><button id="choose-video" class="button button-outline" type="button">▱ Load video file</button></div>
+        <div class="button-row"><button id="choose-video" class="button button-outline" type="button">▱ Load video file</button><button id="choose-video-folder" class="button button-outline" type="button" title="A folder of videos: pick one, and its fixations and reference are found by name">▱ Load folder</button></div>
+        <div id="video-list-row" class="video-list-row" hidden><button id="video-prev" class="nav-button" type="button" aria-label="Previous video">‹</button><div class="select-wrap"><select id="video-list" aria-label="Video in the folder"></select></div><button id="video-next" class="nav-button" type="button" aria-label="Next video">›</button></div>
         <label class="input-label" for="video-url">OR A DIRECT LINK (.mp4 / .webm)</label>
         <div class="url-row"><input id="video-url" type="url" placeholder="https://…/clip.mp4"><button id="load-video-url" class="button button-outline" type="button">Open</button></div>
         <label class="input-label" for="layout">VIDEO LAYOUT</label>
@@ -103,7 +104,7 @@
       <section id="reference-section" class="side-section">
         <div class="section-title"><span class="section-icon">◧</span> Reference maps <span class="section-number">E</span></div>
         <p class="hint">Ground-truth maps to compare with: a Salient360 <code>.bin</code>, a <code>.npy</code> (frames, height, width), one image, or one image per frame.</p>
-        <div class="button-row"><button id="choose-ref" class="button button-outline" type="button">◧ Load reference</button><button id="clear-ref" class="button button-outline" type="button" disabled>Clear</button></div>
+        <div class="button-row"><button id="choose-ref" class="button button-outline" type="button">◧ Load file</button><button id="choose-ref-folder" class="button button-outline" type="button" title="A folder of maps for several videos: the one for the open video is picked by name">▱ Folder</button><button id="clear-ref" class="button button-outline" type="button" disabled>Clear</button></div>
         <input id="ref-input" type="file" accept=".bin,.npy,image/*" multiple hidden>
         <dl class="details compact"><div><dt>File</dt><dd id="ref-name">—</dd></div><div><dt>Frames</dt><dd id="ref-size">—</dd></div></dl>
         <div class="grid2">
@@ -175,7 +176,12 @@
       <div class="inspector-heading"><div class="eyebrow">MAKE IT YOURS</div><h2>Saliency settings</h2><p>Every change redraws the current frame.</p></div>
 
       <div class="settings-section"><div class="section-title"><span class="section-icon">◐</span> Gaussian <span class="section-number">01</span></div>
-        <div class="button-row"><button id="preset-dataset" class="button button-outline" type="button" title="σ 3°, ±1 s Gaussian weights, speed filter 75°/s, motion compensation on when analysed">Match the dataset maps</button></div>
+        <label class="input-label" for="preset">PRESET</label>
+        <div class="select-wrap"><select id="preset"></select></div>
+        <p id="preset-about" class="hint"></p>
+        <div class="button-row"><button id="template-save" class="button button-outline small" type="button" title="Keep the current settings under a name, in this browser">Save as template</button><button id="template-delete" class="button button-outline small" type="button" disabled>Delete</button></div>
+        <div class="button-row"><button id="template-export" class="button button-outline small" type="button" title="Download the current settings as a .json file">Export settings</button><button id="template-import" class="button button-outline small" type="button" title="Load settings from a template file or an exported settings.json">Import settings</button></div>
+        <input id="template-input" type="file" accept=".json,application/json" hidden>
         <label class="input-label" for="projection">PROJECTION</label>
         <div class="select-wrap"><select id="projection"><option value="erp">360° equirectangular (sphere Gaussian)</option><option value="planar">2D video (image-plane Gaussian)</option></select></div>
         <div class="setting-row"><label for="sigma">σ (degrees)</label><input id="sigma-num" class="num" type="number" min="0.25" max="30" step="0.25" value="2"></div>
@@ -264,6 +270,8 @@
     </aside>
   </main>
   <input id="video-input" type="file" accept="video/*,.mkv,.mov" hidden>
+  <input id="video-folder-input" type="file" webkitdirectory multiple hidden>
+  <input id="ref-folder-input" type="file" webkitdirectory multiple hidden>
   <input id="gaze-input" type="file" accept=".csv,.tsv,.txt,.json,.arff,.dat" multiple hidden>
   <input id="gaze-folder-input" type="file" webkitdirectory multiple hidden>
   <script type="module" src="./src/app.js"></script>

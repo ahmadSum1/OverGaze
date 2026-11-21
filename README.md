@@ -47,6 +47,10 @@ Both are recognised on sight; their usual settings are filled in and written in 
 
 The box **Only files whose path contains** overrides the automatic choice of files.
 
+### Many videos at once
+
+**Load folder** in panel A takes a folder of videos (for example Salient360's `Video_Stimuli/Stimuli`, 19 videos); pick one in the list or step with ‹ ›. Gaze files and reference maps can then be loaded once for all videos, as folders: every file is remembered, and each time another video is opened, its own fixation files and reference are taken by name and the others are left out. Names match when a folder is called like the video (YT360), a file name starts with the video name and `.` or `_` (VR-EyeTracking, Salient360 `2_Diner_fixations.csv`, `2_Diner_2048x1024x600_32b.bin`), or a folder ends in `_<video name>` (`maps_mc3_vret/vret_001/sal.npy`). Among references a `.bin` is preferred to a `.npy`, and both to images. **Folder** in panel E loads such a reference folder; **clear all** and **Clear** forget the remembered files.
+
 **Load files** and **Load folder** add to what is loaded when the new files have the same columns (one column mapping serves them all). A file counts as loaded already when its name, size and date match, however it was chosen; different files with the same name (say `L/x.csv` and `R/x.csv` chosen one at a time) are both kept and told apart as `x` and `x (2)`; files of another format replace the loaded ones. **clear all** removes every gaze file. In the observer list, × removes one observer (with one observer per file, that file) and *bring back* restores them. Notices and errors close with their ×, and loading another video clears the old error.
 
 **Something wrong?** **Copy debug details** (in the export panel and the help menu) copies a plain-text report: browser and the video codecs it can play, the video (size, frame rate, errors), every gaze file used with its row count, files that could not be read or had other columns, the column mapping and any mapping error, settings, motion analysis, and every notice and error so far. Paste it into a message or bug report.
@@ -115,7 +119,20 @@ All settings redraw the current frame and are written into `settings.json` with 
 | Rotate / flip | Longitude offset and left–right / up–down flips, for orientation checks. |
 | Display | Heatmap (alpha rises with saliency), flat heatmap, spotlight (darkens what nobody looks at), grey map as exported, or off; colour map, opacity, gamma, live map width, gaze points coloured by observer. |
 
-**Match the dataset maps** sets σ 3°, ±1 s with Gaussian weights and the 75°/s filter (0 for fixation data), and turns motion compensation on once the motion has been analysed. This is the recipe behind the pooled training maps of the video-saliency data (see [docs/validation.md](docs/validation.md)).
+### Presets, templates, import and export
+
+The **Preset** list (top of the settings) sets everything that changes the maps at once, and says where the values come from:
+
+| preset | σ | window | other | source |
+|---|---|---|---|---|
+| Salient360: head + eye maps | 2° | this frame | both eyes (L + R files), no speed filter | David et al., MMSys 2018 and the dataset readme: a 2° Gaussian per eye fixation, both eyes combined, one map per frame; fixations were parsed by the authors (below 80°/s, at least 80 ms). Matches the `.bin` maps at CC 1.000. Set automatically when Salient360 fixation files are recognised. |
+| Salient360: 200 ms pooling | 2° | ±0.1 s, flat | | the paper's comparisons (section 4.2): frames pooled in 200 ms intervals, summed and normalised |
+| Salient360: head-only maps | 3.34° | this frame | | the dataset's head-only maps (viewport centre of each head sample) |
+| Video-saliency training maps “mc3” | 3° | ±1 s, Gaussian (σ 0.5 s) | motion compensation, 75°/s for raw gaze | the pooled VR-EyeTracking / YT360 training maps (see [docs/validation.md](docs/validation.md)) |
+| Live mask | 3° | past 1 s, fading | causal | what a real-time mask could use |
+| OverGaze defaults | 2° | this frame | | |
+
+**Save as template** keeps the current settings under a name in this browser (they appear under *My templates*; **Delete** removes one). **Export settings** downloads them as a small `.overgaze.json` file; **Import settings** reads such a file, or the `settings.json` of any map export, applies it and keeps it as a template.
 
 ![Pooling settings](docs/screenshots/06-pooling-settings.png)
 

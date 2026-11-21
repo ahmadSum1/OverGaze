@@ -248,3 +248,44 @@ test('the unfolded 360° views (cubemap, equi-angular cubemap, cylinder) match f
     }
   } finally { b.close(); server.close(); }
 });
+
+test('a folder of videos: fixations and references follow the chosen video; settings export and import', opts, async () => {
+  const { server, url } = await serve(), b = await launch();
+  const dir = mkdtempSync(join(tmpdir(), 'overgaze-lib-'));
+  try {
+    for (const d of ['videos', 'gaze', 'refs']) mkdirSync(join(dir, d));
+    for (const v of ['clipA', 'clipB']) copyFileSync(join(ROOT, 'sample', 'sample_erp.mp4'), join(dir, 'videos', `${v}.mp4`));
+    const csv = 'user,start_time,duration,longitude,latitude\n';
+    writeFileSync(join(dir, 'gaze', 'clipA_fix.csv'), csv + '1,1.0,2.0,0.5,0.5\n');
+    writeFileSync(join(dir, 'gaze', 'clipB_fix.csv'), csv + '1,1.0,2.0,0.25,0.5\n2,1.0,2.0,0.25,0.5\n');
+    // one static reference image per clip
+    const { encodeGrayPng } = await import('../src/export.js');
+    const png = Buffer.from(await encodeGrayPng(Float32Array.from({ length: 64 * 32 }, (_, i) => (i % 64) / 63), 64, 32, 8));
+    writeFileSync(join(dir, 'refs', 'clipA_saliency.png'), png); writeFileSync(join(dir, 'refs', 'clipB_saliency.png'), png);
+
+    await b.goto(url);
+    await b.setFiles('#video-folder-input', [join(dir, 'videos')]);
+    await b.waitFor('overgaze.state.library.videos.length === 2 && overgaze.state.video.name === "clipA.mp4"', 20000, 'video folder');
+    await b.setFiles('#gaze-folder-input', [join(dir, 'gaze')]);
+    await b.waitFor('overgaze.state.gaze && overgaze.state.files.length === 1', 10000, 'clipA gaze');
+    await b.setFiles('#ref-folder-input', [join(dir, 'refs')]);
+    await b.waitFor('overgaze.state.ref && overgaze.state.ref.name === "clipA_saliency.png"', 10000, 'clipA reference').catch(async e => { console.log(await b.eval('document.querySelector("#notice-text").textContent + " / " + overgaze.state.library.refs.length + " / " + (overgaze.state.ref && overgaze.state.ref.name)'), b.logs); throw e; });
+    await b.click('#video-next');
+    await b.waitFor('overgaze.state.video.name === "clipB.mp4" && overgaze.state.files[0]?.name === "clipB_fix.csv" && overgaze.state.ref?.name === "clipB_saliency.png"', 20000, 'clipB tied');
+    assert.equal(await b.eval('overgaze.state.gaze.observers.length'), 2);
+
+    // presets and settings files
+    await b.eval(`document.querySelector('#preset').value = 'p:salient360-he'; document.querySelector('#preset').dispatchEvent(new Event('change')); 1`);
+    assert.equal(await b.eval('overgaze.state.settings.sigmaDeg'), 2);
+    await b.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: dir });
+    await b.eval('overgaze.applySettings({ sigmaDeg: 4.5, windowSec: 0.7 }); 1');
+    await b.click('#template-export');
+    for (let i = 0; i < 50 && !readdirSync(dir).some(f => f.endsWith('.overgaze.json')); i++) await new Promise(r => setTimeout(r, 100));
+    const saved = readdirSync(dir).find(f => f.endsWith('.overgaze.json'));
+    assert.ok(saved, 'settings file downloaded');
+    await b.eval('overgaze.applySettings({ sigmaDeg: 2, windowSec: 0 }); 1');
+    await b.setFiles('#template-input', [join(dir, saved)]);
+    await b.waitFor('overgaze.state.settings.sigmaDeg === 4.5 && overgaze.state.settings.windowSec === 0.7', 5000, 'settings imported');
+    assert.match(await b.eval('document.querySelector("#preset").selectedOptions[0].parentElement.label'), /My templates/);
+  } finally { b.close(); server.close(); }
+});

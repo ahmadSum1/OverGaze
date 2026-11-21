@@ -291,3 +291,19 @@ test('cylindrical panoramas and cube face orders', async () => {
   assert.deepEqual(t.c3x2.l, [0, 0, 1]); assert.deepEqual(t.c3x2.f, [5, 0, 1]);
   assert.throws(() => faceTables({ order: 'RRUDFB' }), /each of R L U D F B/);
 });
+
+test('presets, imported settings and references matched to a video', async () => {
+  const { PRESETS, settingsFromJson } = await import('../src/presets.js');
+  const { referencesFor } = await import('../src/reference.js');
+  const he = PRESETS.find(p => p.id === 'salient360-he');
+  assert.equal(he.settings.sigmaDeg, 2); assert.equal(he.settings.windowSec, 0); assert.equal(he.settings.velocity, 0);
+  const fromExport = settingsFromJson({ video: { name: 'a.mp4' }, saliency: { projection: 'erp', sigma_deg: 3, pooling_window_s: 1, pooling_weight: 'gaussian', motion_compensation: true, coverage_threshold: 0.2 } });
+  assert.deepEqual(fromExport.settings, { projection: 'erp', sigmaDeg: 3, windowSec: 1, kernel: 'gaussian', motionComp: true, coverageThreshold: 0.2 });
+  assert.deepEqual(settingsFromJson({ overgaze_template: 1, name: 'x', settings: { sigmaDeg: 4, junk: 1 } }), { name: 'x', settings: { sigmaDeg: 4 } });
+  assert.throws(() => settingsFromJson({ hello: 1 }), /no OverGaze settings/);
+  const f = path => ({ name: path.split('/').pop(), webkitRelativePath: path });
+  const files = ['SalMaps/2_Diner_2048x1024x600_32b.bin', 'SalMaps/2_Diner_saliency.png', 'SalMaps/12_TeatroRegioTorino_2048x1024x600_32b.bin', 'maps_mc3_vret/vret_001/sal.npy', 'maps_mc3_vret/vret_0010/sal.npy'].map(f);
+  assert.deepEqual(referencesFor(files, '2_Diner').map(x => x.name), ['2_Diner_2048x1024x600_32b.bin'], 'the .bin is preferred to the static image');
+  assert.deepEqual(referencesFor(files, '001').map(x => x.webkitRelativePath), ['maps_mc3_vret/vret_001/sal.npy']);
+  assert.deepEqual(referencesFor(files, '7_GazaFishermen'), []);
+});
