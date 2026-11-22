@@ -398,3 +398,32 @@ test('settings files carry the minimum duration and the drop rules', async () =>
   assert.equal(tpl.settings.minDurationMs, 80); assert.equal(tpl.rowRules[0].clauses[0].column, 'conf');
   assert.ok(PRESETS.every(p => p.settings.minDurationMs === 0), 'presets switch the minimum duration off');
 });
+
+// ---------- frame rate from the MP4 header ----------
+import { fpsFromMoov, fpsFromMp4File } from '../src/mp4fps.js';
+
+function box(type, ...parts) {
+  const body = parts.map(p => p instanceof Uint8Array ? p : new Uint8Array(p.buffer || p));
+  const n = 8 + body.reduce((a, p) => a + p.length, 0), out = new Uint8Array(n), v = new DataView(out.buffer);
+  v.setUint32(0, n); out.set(new TextEncoder().encode(type), 4);
+  let o = 8; for (const p of body) { out.set(p, o); o += p.length; }
+  return out;
+}
+const u32 = (...xs) => { const b = new Uint8Array(4 * xs.length), v = new DataView(b.buffer); xs.forEach((x, i) => v.setUint32(4 * i, x)); return b; };
+function track(handler, timescale, runs) {
+  const mdhd = box('mdhd', u32(0, 0, 0, timescale, 0, 0));
+  const hdlr = box('hdlr', u32(0, 0), new TextEncoder().encode(handler), u32(0, 0, 0), new Uint8Array(1));
+  const stts = box('stts', u32(0, runs.length, ...runs.flat()));
+  return box('trak', box('mdia', mdhd, hdlr, box('minf', box('stbl', stts))));
+}
+
+test('the frame rate comes from the video track of the MP4 header (time scale and frame durations), not the sound track', async () => {
+  const moov = box('moov', track('soun', 48000, [[1000, 1024]]), track('vide', 30000, [[599, 1001], [1, 1001]]));
+  const r = fpsFromMoov(moov.buffer);
+  close(r.fps, 30000 / 1001, 1e-9); assert.equal(r.frames, 600);
+  // in a file: ftyp, mdat, then moov at the end (as most cameras write it)
+  const file = new Blob([box('ftyp', new TextEncoder().encode('isom')), box('mdat', new Uint8Array(5000)), box('moov', track('vide', 12800, [[500, 512]]))]);
+  assert.equal((await fpsFromMp4File(file)).fps, 25);
+  assert.equal(await fpsFromMp4File(new Blob([new TextEncoder().encode('\x1aE\xdf\xa3 webm header')])), null, 'not MP4: measured instead');
+  assert.equal(fpsFromMoov(box('moov', track('vide', 30000, [])).buffer), null, 'fragmented file without a frame table');
+});

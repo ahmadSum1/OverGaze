@@ -84,7 +84,7 @@ test('choosing a whole VR-EyeTracking-style folder keeps only the files of the l
     copyFileSync(join(ROOT, 'sample', 'sample_erp.mp4'), join(dir, '001.mp4'));
     await b.goto(url);
     await b.setFiles('#video-input', [join(dir, '001.mp4')]);
-    await b.waitFor('document.querySelector("#video-name").textContent === "001.mp4" && overgaze.state.fpsSource === "measured"', 20000, 'video');
+    await b.waitFor('document.querySelector("#video-name").textContent === "001.mp4" && overgaze.state.fpsSource === "file"', 20000, 'video');
     await b.setFiles('#gaze-folder-input', [join(dir, 'Gaze_txt_files')]);
     await b.waitFor('!!overgaze.state.gaze', 20000, 'gaze');
     assert.deepEqual(await b.eval('overgaze.state.gaze.observers'), ['p001', 'p002'], 'observers come from the folder names; video 002 is left out');
@@ -117,7 +117,7 @@ test('gaze files add up, observers can be removed, messages can be dismissed, a 
 
     await b.goto(url);
     await b.setFiles('#video-input', [join(ROOT, 'sample', 'sample_erp.mp4')]);
-    await b.waitFor('overgaze.state.fpsSource === "measured"', 20000, 'video');
+    await b.waitFor('overgaze.state.fpsSource === "file"', 20000, 'video');
     await b.setFiles('#gaze-input', [join(dir, 'a.csv')]);
     await b.waitFor('!!overgaze.state.gaze', 10000);
     await b.setFiles('#gaze-input', [join(dir, 'b.csv')]);
@@ -418,6 +418,39 @@ test('outliers: drop rules and minimum duration report what they removed; agreem
     // removing is still the person's choice: × removes observer 9
     await b.click(`[data-remove="${nine}"]`);
     await b.waitFor('overgaze.state.gaze.observers.length === 9 && overgaze.state.removedObservers.has("9")', 5000, 'removed by hand');
+    assert.deepEqual(b.logs, []);
+  } finally { b.close(); server.close(); }
+});
+
+const ffmpegOk = spawnSync('ffmpeg', ['-version']).status === 0;
+test('the frame rate is known right after the video loads, before it plays: from the MP4 header, or measured (retried when the page is busy)', { skip: opts.skip || (ffmpegOk ? false : 'ffmpeg not available') }, async () => {
+  const { server, url } = await serve(), b = await launch();
+  const dir = mkdtempSync(join(tmpdir(), 'overgaze-fps-'));
+  try {
+    for (const [f, codec] of [['clip25.mp4', ['-c:v', 'libx264', '-pix_fmt', 'yuv420p']], ['clip25.webm', ['-c:v', 'libvpx-vp9', '-b:v', '200k']]])
+      assert.equal(spawnSync('ffmpeg', ['-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=size=256x128:rate=25:duration=6', ...codec, join(dir, f)]).status, 0, 'ffmpeg made ' + f);
+    // frame-numbered gaze: frame 50 is 2 s into a 25 fps video
+    writeFileSync(join(dir, 'g.csv'), 'user,frame,x,y\n1,50,0.5,0.5\n');
+    await b.goto(url);
+    await b.setFiles('#gaze-input', [join(dir, 'g.csv')]);
+    await b.waitFor('!!overgaze.state.gaze', 10000, 'gaze');
+    await b.setFiles('#video-input', [join(dir, 'clip25.mp4')]);
+    await b.waitFor('overgaze.state.fpsSource === "file"', 5000, 'frame rate from the file header');
+    assert.equal(await b.eval('overgaze.state.fps'), 25);
+    assert.equal(await b.eval('document.querySelector("#video").paused'), true, 'without playing');
+    assert.match(await b.eval('document.querySelector("#fps-note").textContent'), /Read from the video file: 25 frames per second/);
+    const t = await b.eval('overgaze.state.gaze.t0[0]');
+    assert.ok(Math.abs(t - 50 / 25) < 0.03, `the gaze row is re-timed with the new frame rate (${t} s)`);
+    // WebM has no such header: measured from decoded frames. Freeze the page for 4 s just after the first
+    // measurement starts playing, so its 3 s wait sees no frames and the measurement has to be retried.
+    await b.eval(`(() => { const play = HTMLMediaElement.prototype.play; window.__plays = 0;
+      HTMLMediaElement.prototype.play = function () { const p = play.call(this); if (this !== document.querySelector('#video') && window.__plays++ === 0) setTimeout(() => { const end = performance.now() + 4000; while (performance.now() < end); }, 20); return p; };
+      return 1; })()`);
+    await b.setFiles('#video-input', [join(dir, 'clip25.webm')]);
+    await b.waitFor('overgaze.state.video.name === "clip25.webm" && overgaze.state.fpsSource === "measured"', 40000, 'measured frame rate');
+    assert.equal(await b.eval('overgaze.state.fps'), 25);
+    assert.ok(await b.eval('window.__plays') >= 2, 'the first measurement was retried');
+    assert.equal(await b.eval('document.querySelector("#video").paused'), true);
     assert.deepEqual(b.logs, []);
   } finally { b.close(); server.close(); }
 });

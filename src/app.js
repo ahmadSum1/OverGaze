@@ -4,6 +4,7 @@ import { DEFAULTS, coverage, frameCentre, frameOf, mapSize, renderMap } from './
 import { FlowStore, toGray } from './flow.js';
 import { ZipWriter, encodeGrayPng, npyHeader } from './export.js';
 import { fpsFromDeltas } from './timing.js';
+import { fpsFromMp4File } from './mp4fps.js';
 import { compareMaps, openReference, referencesFor, resample } from './reference.js';
 import { PRESETS, pickSettings, presetDifferences, settingsFromJson } from './presets.js';
 import { LayoutConverter, VIEW_MODES, View360 } from './view360.js';
@@ -120,7 +121,7 @@ function loadVideoFile(file) {
   showError('');
   if (state.video?.blobUrl) URL.revokeObjectURL(state.video.blobUrl);
   const src = URL.createObjectURL(file);
-  state.video = { name: file.name, size: file.size, src, blobUrl: src, remote: false, tainted: false };
+  state.video = { name: file.name, size: file.size, src, blobUrl: src, remote: false, tainted: false, file };
   resetVideoState();
   video.removeAttribute('crossorigin');
   video.src = src;
@@ -222,35 +223,54 @@ function updateSubtitle() {
 function setFps(f, source) {
   if (!(f > 0)) return;
   state.fps = f; state.fpsSource = source;
-  $('fps').value = String(f);
-  $('fps-note').textContent = source === 'manual' ? 'Set by hand.' : source === 'measured' ? `Measured from decoded frames: ${f} fps.` : 'Default 30. Measured from decoded frames once the video plays.';
+  $('fps').value = String(Math.round(f * 1000) / 1000);
+  $('fps-note').textContent = { manual: 'Set by hand.', file: `Read from the video file: ${Math.round(f * 1000) / 1000} frames per second.`, measured: `Measured from decoded frames: ${Math.round(f * 1000) / 1000} frames per second.` }[source]
+    || 'Default 30 until the frame rate is known: it is read from MP4 / MOV files, otherwise measured from decoded frames.';
   if (state.files.length && state.mapping && (/^frame/.test(state.mapping.timeUnit) || /^frame/.test(state.mapping.durationUnit))) rebuildGaze();
   updateSubtitle(); updateExportSummary(); drawDensity(); requestRender();
 }
 
+// The frame rate, as soon as the video has loaded: from the file header for MP4 / MOV files (exact), otherwise
+// by playing a hidden muted copy and timing the decoded frames. On a busy computer the decoder can skip frames, so
+// the measurement is retried with a longer wait before giving up (playback then measures it as before).
 async function detectFps() {
-  if (!('requestVideoFrameCallback' in HTMLVideoElement.prototype) || !state.video) return;
+  const v = state.video;
+  if (!v) return;
+  if (v.file && /\.(mp4|m4v|mov|3gp)$/i.test(v.name)) {
+    try {
+      const r = await fpsFromMp4File(v.file);
+      if (r && state.video === v) { if (state.fpsSource !== 'manual') setFps(r.fps, 'file'); return; }
+    } catch { /* not readable as MP4: measure instead */ }
+  }
+  if (!('requestVideoFrameCallback' in HTMLVideoElement.prototype)) return;
+  for (const waitMs of [3000, 8000, 20000]) {
+    if (state.video !== v || state.fpsSource !== 'default') return;
+    const f = await measureFps(waitMs).catch(() => null);
+    if (f && state.video === v) { if (state.fpsSource === 'default') setFps(f, 'measured'); return; }
+  }
+  if (state.video === v && state.fpsSource === 'default') notice('The frame rate could not be measured yet, so 30 frames per second is used until the video plays. If the gaze is in frame numbers, set “Video frame rate” by hand.', true);
+}
+
+async function measureFps(waitMs) {
   const probe = hiddenVideo();
   try {
-    await once(probe, 'loadeddata', 8000);
+    await once(probe, 'loadeddata', waitMs + 5000);
     probe.currentTime = Math.min(1, (probe.duration || 2) / 4);
-    await once(probe, 'seeked', 8000);
+    await once(probe, 'seeked', waitMs + 5000);
     const deltas = [];
     let last = null;
     await probe.play();
     await new Promise(resolve => {
-      const stop = setTimeout(resolve, 2500);
+      const stop = setTimeout(resolve, waitMs);
       const cb = (now, meta) => {
         if (last && meta.presentedFrames === last.presentedFrames + 1) deltas.push(meta.mediaTime - last.mediaTime);
         last = meta;
-        if (deltas.length >= 40) { clearTimeout(stop); resolve(); } else probe.requestVideoFrameCallback(cb);
+        if (deltas.length >= 40 || probe.ended) { clearTimeout(stop); resolve(); } else probe.requestVideoFrameCallback(cb);
       };
       probe.requestVideoFrameCallback(cb);
     });
-    const f = fpsFromDeltas(deltas);
-    if (f && state.fpsSource !== 'manual') setFps(f, 'measured');
-  } catch { /* fall back to measuring during playback */ }
-  finally { disposeHidden(probe); }
+    return fpsFromDeltas(deltas);
+  } finally { disposeHidden(probe); }
 }
 
 function hiddenVideo() {
