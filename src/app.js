@@ -1,4 +1,5 @@
-import { FILE_TIME, buildGaze, columnValues, dropObservers, defaultRanges, detectMapping, gazeToCsv, parseTable, pathMatchesVideo, velocityFilter } from './gaze.js';
+import { FILE_TIME, RULE_OPS, buildGaze, columnValues, dropObservers, defaultRanges, detectMapping, gazeToCsv, minDurationFilter, parseTable, pathMatchesVideo, ruleText, velocityFilter } from './gaze.js';
+import { agreementScorer } from './agreement.js';
 import { DEFAULTS, coverage, frameCentre, frameOf, mapSize, renderMap } from './saliency.js';
 import { FlowStore, toGray } from './flow.js';
 import { ZipWriter, encodeGrayPng, npyHeader } from './export.js';
@@ -19,7 +20,8 @@ const GAZE_EXT = /\.(csv|tsv|txt|json|arff|dat)$/i, VIDEO_EXT = /\.(mp4|m4v|webm
 const state = {
   video: null, fps: 30, fpsSource: 'default', fpsDeltas: [], lastFrameMeta: null, mediaTime: 0,
   files: [], mapping: null, gazeAll: null, gaze: null, observerEnabled: null, conditionEnabled: null,
-  settings: { ...DEFAULTS, velocity: 0 },
+  settings: { ...DEFAULTS, velocity: 0, minDurationMs: 0 },
+  rowRules: [], agreement: null, observerSort: 'name',
   display: { outline: false, outlineColor: '#c8f56a', outlineTouched: false, outlineWidth: 2, mode: 'heat', colormap: 'jet', opacity: 0.65, gamma: 1, mapWidth: 512, showPoints: true, showFlow: false },
   flow: null, flowInfo: null, analysing: null, exporting: null, recording: null,
   work: {}, last: null, renderQueued: false, projectionTouched: false, density: null,
@@ -30,7 +32,7 @@ const state = {
 
 // Handle for the tests and the console: mapAt(frame, width) renders the same map the export writes (raw, unnormalised).
 window.overgaze = {
-  state, debugReport: () => debugReport(), applySettings: o => applySettings(o),
+  state, debugReport: () => debugReport(), applySettings: o => applySettings(o), settingsJson: () => settingsJson(),
   mapAt(k, width = 512, normalize = 'none') {
     const [vw, vh] = videoSize(), [W, H] = mapSize(width, state.settings, vw, vh);
     const r = renderMap(state.gaze, frameCentre(k, state.fps), settingsForRender(normalize), W, H, renderContext(), {});
@@ -867,18 +869,41 @@ function rebuildGaze() {
   try {
     const prevObs = state.gaze ? new Map(state.gaze.observers.map((o, i) => [o, state.observerEnabled[i]])) : null;
     const prevCond = state.gaze ? new Map(state.gaze.conditions.map((c, i) => [c, state.conditionEnabled[i]])) : null;
-    const built = buildGaze(state.files, state.mapping, { fps: state.fps });
+    const built = buildGaze(state.files, state.mapping, { fps: state.fps, rules: state.rowRules });
     const removed = new Set(built.observers.map((o, i) => state.removedObservers?.has(o) ? i : -1).filter(i => i >= 0));
     state.gazeAll = dropObservers(built, removed);
-    state.gazeAll.skipped = built.skipped;
-    state.gaze = velocityFilter(state.gazeAll, state.settings.velocity);
+    state.gazeAll.skipped = built.skipped; state.gazeAll.ruleRemoved = built.ruleRemoved; state.gazeAll.rules = built.rules;
+    applyGazeFilters(false);
     state.observerEnabled = Uint8Array.from(state.gaze.observers, o => prevObs?.has(o) ? prevObs.get(o) : 1);
     state.conditionEnabled = Uint8Array.from(state.gaze.conditions, c => prevCond?.has(c) ? prevCond.get(c) : 1);
   } catch (e) {
     state.gaze = null;
     $('mapping-error').hidden = false; $('mapping-error').textContent = e.message; remember('mapping error', e.message);
   }
+  renderRules(); scheduleAgreement();
   renderGroups(); updateGazeSummary(); drawDensity(); updateSubtitle(); updateButtons(); updateExportSummary(); requestRender();
+}
+
+/**
+ * The filters after reading, in a fixed order: rows without a valid time or position are skipped and the drop
+ * rules applied while reading (buildGaze); then fixations shorter than the minimum duration; then the speed filter.
+ */
+function applyGazeFilters(refresh = true) {
+  if (!state.gazeAll) return;
+  const S = state.settings;
+  try {
+    const d = minDurationFilter(state.gazeAll, S.minDurationMs);
+    const g = velocityFilter(d, S.velocity);
+    g.durationRemoved = d.durationRemoved || 0;
+    state.gaze = g;
+    $('mapping-error').hidden = true;
+  } catch (e) {
+    state.gaze = null; $('mapping-error').hidden = false; $('mapping-error').textContent = e.message; remember('filter error', e.message);
+  }
+  $('min-dur').disabled = !state.gazeAll.hasDuration;
+  $('min-dur-hint').textContent = state.gazeAll.hasDuration ? '0 = off. Drops fixations shorter than this, e.g. 100 ms.' : 'Only for fixation files (with a duration or end column): these gaze rows have no durations.';
+  scheduleAgreement();
+  if (refresh) { renderGroups(); updateGazeSummary(); drawDensity(); updateButtons(); updateExportSummary(); requestRender(); }
 }
 
 function updateGazeSummary() {
@@ -887,7 +912,9 @@ function updateGazeSummary() {
   const kind = g.hasDuration ? 'fixations' : 'samples';
   let text = `${state.files.length} file(s), ${g.n.toLocaleString()} ${kind}, ${g.observers.length} observer(s), ${g.conditions.length} condition(s), ${fmt(g.tMin, 2)}–${fmt(g.tMax, 2)} s.`;
   if (state.gazeAll && state.gazeAll.skipped) text += ` ${state.gazeAll.skipped} row(s) skipped (no valid time or position, e.g. nan where the eye tracker lost the eye).`;
-  if (g.filtered) text += ` Velocity filter removed ${g.filtered.toLocaleString()}.`;
+  (state.gazeAll?.rules || []).forEach((r, i) => { text += ` Rule “${ruleText(r)}” removed ${(state.gazeAll.ruleRemoved[i] || 0).toLocaleString()}.`; });
+  if (state.settings.minDurationMs > 0 && g.hasDuration) text += ` Minimum duration (${state.settings.minDurationMs} ms) removed ${(g.durationRemoved || 0).toLocaleString()}.`;
+  if (state.settings.velocity > 0) text += ` Speed filter (${state.settings.velocity}°/s) removed ${(g.filtered || 0).toLocaleString()}.`;
   el.textContent = text;
   if (video.duration && (g.tMax > video.duration * 1.5 + 1 || g.tMax < video.duration * 0.2)) notice(`Gaze times run to ${fmt(g.tMax, 1)} s but the video lasts ${fmt(video.duration, 1)} s: check the time unit or the time offset in the column mapping.`, true);
 }
@@ -904,7 +931,18 @@ function renderGroups() {
   $('observer-count').textContent = `${g.observers.length} observer${g.observers.length === 1 ? '' : 's'}`;
   const removed = state.removedObservers || new Set();
   $('observer-count').textContent = `${g.observers.length - removed.size} observer${g.observers.length - removed.size === 1 ? '' : 's'}${removed.size ? ` (${removed.size} removed)` : ''}`;
-  $('observer-list').innerHTML = g.observers.map((o, i) => removed.has(o) ? '' : `<div class="observer-row"><label><input type="checkbox" data-obs="${i}" ${state.observerEnabled[i] ? 'checked' : ''}><i style="background:${obsColor(i)}"></i><span title="${escapeHtml(o)}">${escapeHtml(o)}</span><small>${obsCounts[i]}</small></label><button class="row-remove" type="button" data-remove="${i}" title="Remove ${escapeHtml(o)}" aria-label="Remove ${escapeHtml(o)}">×</button></div>`).join('')
+  const A = state.agreement?.done && state.agreement.gaze === g ? state.agreement : null;
+  const order = g.observers.map((_, i) => i).filter(i => !removed.has(g.observers[i]));
+  if (state.observerSort === 'agreement' && A) order.sort((a, b) => (Number.isFinite(A.scores[a]) ? A.scores[a] : Infinity) - (Number.isFinite(A.scores[b]) ? A.scores[b] : Infinity));
+  const scoreCell = i => {
+    if (!A) return '';
+    const v = A.scores[i], low = A.low.set.has(i);
+    const tip = Number.isFinite(v)
+      ? `Agreement with the other observers${g.conditions.length > 1 ? ' of the same condition' : ''}: ${v.toFixed(3)} (correlation of the maps, averaged over ${A.frames[i]} frames).` + (low ? ` Far below the others: under ${A.low.cutoff.toFixed(3)}, the lower quartile minus 1.5 × the spread between the quartiles (the box-plot rule). Not removed: use × if you decide to.` : '')
+      : 'No frame where this observer and the others both have gaze.';
+    return `<b class="agree${low ? ' low' : ''}" title="${escapeHtml(tip)}">${low ? '⚠ ' : ''}${Number.isFinite(v) ? (Math.abs(v) < 0.005 ? 0 : v).toFixed(2) : '—'}</b>`;
+  };
+  $('observer-list').innerHTML = order.map(i => { const o = g.observers[i]; return `<div class="observer-row${A?.low.set.has(i) ? ' flagged' : ''}"><label><input type="checkbox" data-obs="${i}" ${state.observerEnabled[i] ? 'checked' : ''}><i style="background:${obsColor(i)}"></i><span title="${escapeHtml(o)}">${escapeHtml(o)}</span><small>${obsCounts[i]}</small>${scoreCell(i)}</label><button class="row-remove" type="button" data-remove="${i}" title="Remove ${escapeHtml(o)}" aria-label="Remove ${escapeHtml(o)}">×</button></div>`; }).join('')
     + (removed.size ? `<button id="restore-observers" class="link-button" type="button">bring back the ${removed.size} removed</button>` : '');
 }
 $('observer-list').addEventListener('click', e => {
@@ -922,6 +960,56 @@ function clearGaze(quiet = false) {
 $('clear-gaze').addEventListener('click', () => clearGaze());
 $('observer-list').addEventListener('change', e => { const i = e.target.dataset.obs; if (i == null) return; state.observerEnabled[i] = e.target.checked ? 1 : 0; drawDensity(); requestRender(); });
 $('condition-list').addEventListener('change', e => { const i = e.target.dataset.cond; if (i == null) return; state.conditionEnabled[i] = e.target.checked ? 1 : 0; drawDensity(); requestRender(); });
+// ---------- observer agreement (a flag, never a filter) ----------
+const AGREE_W = 128, AGREE_H = 64, AGREE_MAX_FRAMES = 400;
+/** What the scores depend on: the gaze after filters and the settings that shape the maps. */
+function agreementKey() {
+  const s = state.settings;
+  return JSON.stringify([s.projection, s.sigmaDeg, s.truncate, s.planarFovDeg, s.windowSec, s.kernel, s.causal, s.durationWeight, !!(s.motionComp && state.flow), s.lonOffsetDeg, s.flipX, s.flipY, state.fps, video.duration || 0]);
+}
+let agreementTimer = 0;
+function scheduleAgreement() {
+  const g = state.gaze;
+  if (state.agreement && state.agreement.gaze === g && state.agreement.key === agreementKey()) return;   // up to date or on its way
+  clearTimeout(agreementTimer);
+  if (!g) { if (state.agreement) state.agreement.cancel = true; state.agreement = null; updateAgreementStatus(); return; }
+  if (state.agreement) state.agreement.cancel = true;
+  state.agreement = { gaze: g, key: agreementKey(), done: false, stale: !!state.agreement?.done, progress: 0, scores: state.agreement?.scores };
+  updateAgreementStatus();
+  agreementTimer = setTimeout(runAgreement, 600);
+}
+async function runAgreement() {
+  const job = state.agreement, g = job?.gaze;
+  if (!g || job.cancel) return;
+  const s = { ...settingsForRender('none') }, fps = state.fps;
+  const t0 = Math.max(0, g.tMin), t1 = video.duration ? Math.min(video.duration, g.tMax) : g.tMax;
+  const k0 = frameOf(t0, fps), k1 = Math.max(k0, frameOf(t1, fps));
+  const step = Math.max(1, Math.ceil((k1 - k0 + 1) / AGREE_MAX_FRAMES));
+  const ks = []; for (let k = k0; k <= k1; k += step) ks.push(k);
+  const scorer = agreementScorer(g, s, { ...renderContext() }, AGREE_W, AGREE_H);
+  let i = 0;
+  while (i < ks.length) {
+    const until = performance.now() + 12;
+    while (i < ks.length && performance.now() < until) scorer.add(frameCentre(ks[i++], fps));
+    job.progress = i / ks.length; updateAgreementStatus();
+    await new Promise(r => setTimeout(r, 0));
+    if (job.cancel || state.agreement !== job) return;
+  }
+  Object.assign(job, scorer.result(), { done: true, stale: false, frameCount: ks.length, step });
+  updateAgreementStatus(); renderGroups();
+}
+function updateAgreementStatus() {
+  const A = state.agreement, el = $('agreement-status');
+  if (!el) return;
+  $('obs-sort').hidden = $('obs-sort-sep').hidden = !(A && A.done);
+  if (!A) { el.textContent = ''; return; }
+  if (!A.done) { el.textContent = `Scoring agreement between observers… ${Math.round(100 * (A.progress || 0))} %`; return; }
+  const n = A.low.set.size;
+  el.textContent = `Agreement: each observer's map against the map of all the others${state.gaze.conditions.length > 1 ? ' in the same condition' : ''} (correlation, ${A.W} × ${A.H}, ${A.frameCount} frames over the clip). `
+    + (n ? `${n} far below the rest (marked ⚠). Nobody is removed automatically.` : Number.isFinite(A.low.cutoff) ? 'None stands out.' : 'Too few observers to mark low ones.');
+}
+$('obs-sort').addEventListener('click', () => { state.observerSort = state.observerSort === 'agreement' ? 'name' : 'agreement'; $('obs-sort').textContent = state.observerSort === 'agreement' ? 'sort by name' : 'sort by agreement'; renderGroups(); });
+
 $('obs-all').addEventListener('click', () => { if (!state.gaze) return; state.observerEnabled.fill(1); renderGroups(); drawDensity(); requestRender(); });
 $('obs-none').addEventListener('click', () => { if (!state.gaze) return; state.observerEnabled.fill(0); renderGroups(); drawDensity(); requestRender(); });
 
@@ -1040,7 +1128,8 @@ $('duration-weight').addEventListener('change', e => { state.settings.durationWe
 $('fps').addEventListener('change', e => { const f = Number(e.target.value); if (f > 0) { setFps(f, 'manual'); if (/^frame/.test(state.mapping?.timeUnit) || /^frame/.test(state.mapping?.durationUnit)) rebuildGaze(); } });
 $('motion').addEventListener('change', e => { state.settings.motionComp = e.target.checked; state.wantMotion = e.target.checked; onSettings(); });
 $('show-flow').addEventListener('change', e => { state.display.showFlow = e.target.checked; requestRender(); });
-$('vel').addEventListener('change', e => { state.settings.velocity = Math.max(0, Number(e.target.value) || 0); if (state.gazeAll) { state.gaze = velocityFilter(state.gazeAll, state.settings.velocity); updateGazeSummary(); drawDensity(); } onSettings(); });
+$('vel').addEventListener('change', e => { state.settings.velocity = Math.max(0, Number(e.target.value) || 0); applyGazeFilters(); onSettings(); });
+$('min-dur').addEventListener('change', e => { state.settings.minDurationMs = Math.max(0, Number(e.target.value) || 0); e.target.value = String(state.settings.minDurationMs); applyGazeFilters(); onSettings(); });
 $('flip-x').addEventListener('change', e => { state.settings.flipX = e.target.checked; onSettings(); });
 $('flip-y').addEventListener('change', e => { state.settings.flipY = e.target.checked; onSettings(); });
 $('mode').addEventListener('change', e => { state.display.mode = e.target.value; requestRender(); });
@@ -1053,7 +1142,7 @@ $('map-width').addEventListener('change', e => { state.display.mapWidth = Number
 $('show-outline').addEventListener('change', e => { state.display.outline = e.target.checked; state.display.outlineTouched = true; if (e.target.checked) state.showGaze = true; syncLayerChips(); requestRender(); });
 $('show-points').addEventListener('change', e => { state.display.showPoints = e.target.checked; if (e.target.checked) state.showGaze = true; syncLayerChips(); requestRender(); });
 $('speed').addEventListener('change', e => { video.playbackRate = Number(e.target.value); });
-function onSettings() { updateExportSummary(); requestRender(); }
+function onSettings() { updateExportSummary(); requestRender(); scheduleAgreement(); }
 
 /** Set several settings at once and keep the controls in step (used by presets, the address bar and the tests). */
 function applySettings(o) {
@@ -1063,16 +1152,43 @@ function applySettings(o) {
   if ('kernel' in o) { S.kernel = o.kernel; $('kernel').value = o.kernel; }
   for (const [key, id] of [['causal', 'causal'], ['durationWeight', 'duration-weight'], ['flipX', 'flip-x'], ['flipY', 'flip-y']]) if (key in o) { S[key] = !!o[key]; $(id).checked = !!o[key]; }
   if ('motionComp' in o) { S.motionComp = !!o.motionComp && !!state.flow; $('motion').checked = S.motionComp; state.wantMotion = !!o.motionComp; }
-  if ('velocity' in o) {
-    S.velocity = Math.max(0, Number(o.velocity) || 0); $('vel').value = String(S.velocity);
-    if (state.gazeAll) { state.gaze = velocityFilter(state.gazeAll, S.velocity); updateGazeSummary(); drawDensity(); }
-  }
+  if ('velocity' in o) { S.velocity = Math.max(0, Number(o.velocity) || 0); $('vel').value = String(S.velocity); }
+  if ('minDurationMs' in o) { S.minDurationMs = Math.max(0, Number(o.minDurationMs) || 0); $('min-dur').value = String(S.minDurationMs); }
+  if (('velocity' in o || 'minDurationMs' in o) && state.gazeAll) applyGazeFilters();
   if (o.projection === 'erp' || o.projection === 'planar') { S.projection = o.projection; $('projection').value = o.projection; $('fov-row').hidden = o.projection !== 'planar'; state.projectionTouched = true; updateSubtitle(); updateButtons(); }
   if ('planarFovDeg' in o) { S.planarFovDeg = Math.max(1, Number(o.planarFovDeg) || 90); $('fov').value = String(S.planarFovDeg); }
   if ('truncate' in o) S.truncate = Math.max(1, Number(o.truncate) || 3);
   if ('coverageThreshold' in o) { S.coverageThreshold = Math.min(0.99, Math.max(0.001, Number(o.coverageThreshold) || 0.1)); $('cov-thr').value = String(S.coverageThreshold); $('ro-coverage-label').textContent = `COVERAGE ≥ ${S.coverageThreshold} MAX`; }
   onSettings();
 }
+// ---------- drop rules: "drop rows where <column> <, >, = value [and …]" ----------
+function ruleColumns() { const set = new Set(); for (const f of state.files) for (const c of f.table.columns) set.add(c); return [...set]; }
+function renderRules() {
+  const cols = ruleColumns(), esc = escapeHtml;
+  const colOpts = sel => (cols.includes(sel) || !sel ? cols : [sel, ...cols]).map(c => `<option${c === sel ? ' selected' : ''}>${esc(c)}</option>`).join('');
+  $('rule-list').innerHTML = state.rowRules.map((r, i) => `<div class="rule" data-rule="${i}">${r.clauses.map((c, j) => `<span class="rule-part" data-part="${j}"><span class="rule-and">${j ? 'and' : 'drop if'}</span><select data-k="column" aria-label="Column">${colOpts(c.column)}</select><select data-k="op" aria-label="Comparison">${RULE_OPS.map(o => `<option${o === c.op ? ' selected' : ''}>${o}</option>`).join('')}</select><input data-k="value" type="text" value="${esc(c.value)}" aria-label="Value" placeholder="value"></span>`).join('')}<span class="rule-buttons"><button class="link-button" type="button" data-and title="Add another part: the row is dropped only when all parts hold">＋ and</button><button class="link-button" type="button" data-drop-rule title="Remove this rule">remove rule</button></span></div>`).join('');
+  $('rule-add').disabled = !cols.length;
+}
+let rulesTimer = 0;
+function rulesChanged() { clearTimeout(rulesTimer); rulesTimer = setTimeout(() => { if (state.files.length) rebuildGaze(); }, 250); }
+$('rule-add').addEventListener('click', () => {
+  const cols = ruleColumns(), pick = cols.find(c => /conf|valid|quality/i.test(c)) || cols[0];
+  state.rowRules.push({ clauses: [{ column: pick, op: '<', value: '' }] }); renderRules();
+  $('rule-list').lastElementChild?.querySelector('input')?.focus();
+});
+$('rule-list').addEventListener('click', e => {
+  const r = e.target.closest('[data-rule]'); if (!r) return;
+  const rule = state.rowRules[Number(r.dataset.rule)];
+  if (e.target.closest('[data-drop-rule]')) { state.rowRules.splice(Number(r.dataset.rule), 1); renderRules(); rulesChanged(); }
+  else if (e.target.closest('[data-and]')) { const last = rule.clauses[rule.clauses.length - 1]; rule.clauses.push({ column: ruleColumns().find(c => c !== last.column) || last.column, op: '=', value: '' }); renderRules(); }
+});
+$('rule-list').addEventListener('change', e => {
+  const r = e.target.closest('[data-rule]'), part = e.target.closest('[data-part]'); if (!r || !part) return;
+  state.rowRules[Number(r.dataset.rule)].clauses[Number(part.dataset.part)][e.target.dataset.k] = e.target.value.trim();
+  rulesChanged();
+});
+function setRowRules(rules) { state.rowRules = (rules || []).map(r => ({ clauses: r.clauses.map(c => ({ ...c })) })); renderRules(); if (state.files.length) rebuildGaze(); }
+
 // ---------- presets and saved templates ----------
 const TEMPLATE_KEY = 'overgaze.templates';
 function loadTemplates() { try { return JSON.parse(localStorage.getItem(TEMPLATE_KEY) || '[]'); } catch { return []; } }
@@ -1096,7 +1212,7 @@ function presetByValue(v) {
 function chosenPreset() { return presetByValue(state.presetBase); }
 const SETTING_LABELS = { projection: 'projection', sigmaDeg: 'σ', truncate: 'kernel cut-off', planarFovDeg: 'field of view', windowSec: 'pooling window',
   kernel: 'pooling weight', causal: 'past only', durationWeight: 'weight by duration', motionComp: 'motion compensation', lonOffsetDeg: 'rotation',
-  flipX: 'left–right flip', flipY: 'up–down flip', velocity: 'speed filter', coverageThreshold: 'coverage threshold' };
+  flipX: 'left–right flip', flipY: 'up–down flip', velocity: 'speed filter', minDurationMs: 'minimum duration', coverageThreshold: 'coverage threshold' };
 /**
  * Once any setting differs from the chosen preset, the menu shows "(custom <preset name>)" as a separate entry,
  * so that choosing the preset itself again is a change of the menu and restores its values.
@@ -1142,7 +1258,7 @@ $('template-delete').addEventListener('click', () => {
 });
 $('template-export').addEventListener('click', () => {
   const p = chosenPreset(), name = (p && state.presetCustom ? `custom ${p.name}` : p?.name) || `OverGaze settings ${new Date().toISOString().slice(0, 10)}`;
-  const body = { overgaze_template: 1, name, settings: pickSettings({ ...state.settings, motionComp: state.settings.motionComp || !!state.wantMotion }) };
+  const body = { overgaze_template: 1, name, settings: pickSettings({ ...state.settings, motionComp: state.settings.motionComp || !!state.wantMotion }), row_rules: state.rowRules };
   download(new Blob([JSON.stringify(body, null, 2)], { type: 'application/json' }), `${name.replace(/[^\w.-]+/g, '_').slice(0, 60)}.overgaze.json`);
 });
 $('template-import').addEventListener('click', () => $('template-input').click());
@@ -1150,8 +1266,9 @@ $('template-input').addEventListener('change', async e => {
   const f = e.target.files[0]; e.target.value = '';
   if (!f) return;
   try {
-    const { name, settings } = settingsFromJson(JSON.parse(await f.text()));
+    const { name, settings, rowRules } = settingsFromJson(JSON.parse(await f.text()));
     applySettings(settings);
+    if (rowRules) setRowRules(rowRules);
     const list = loadTemplates(), label = name || f.name.replace(/\.(overgaze\.)?json$/i, '');
     list.push({ name: label, settings });
     storeTemplates(list); renderPresetList(`t:${list.length - 1}`);
@@ -1230,8 +1347,31 @@ function settingsJson(extra = {}) {
       frame_rule: 'frame k covers [k/fps, (k+1)/fps); a gaze sample or fixation counts if its time distance to that interval is <= pooling_window_s (0 = active during the frame).',
       gaussian: s.projection === 'erp' ? 'exp(-theta^2 / (2 sigma^2)), theta = great-circle angle to the gaze point, summed over points' : '2D Gaussian in the image plane, sigma_px = sigma_deg * width / planar_fov_deg'
     },
+    gaze_processing: g ? gazeProcessingJson() : { min_fixation_duration_ms: s.minDurationMs || 0, speed_filter_deg_per_s: s.velocity || 0, drop_row_rules: state.rowRules.map(r => ({ all_of: r.clauses })) },
     motion: s.motionComp && state.flow ? { flow_width: state.flow.W, flow_height: state.flow.H, fields: state.flow.size, step_s: state.flow.step, ...state.flowInfo, method_note: 'pyramidal Lucas-Kanade on greyscale frames, wrap-around at the left/right edge for 360° video; each pooled point is moved along the flow from its own time to the frame time' } : null,
     ...extra
+  };
+}
+/** The gaze filters with what each removed, the removed observers and the agreement scores, for settings.json. */
+function gazeProcessingJson() {
+  const s = state.settings, g = state.gaze, all = state.gazeAll, A = state.agreement?.done && state.agreement.gaze === g ? state.agreement : null;
+  return {
+    order: 'rows without a valid time or position are skipped, then the drop rules, then the minimum fixation duration, then the speed filter; removed observers are left out first',
+    rows_skipped_invalid: all.skipped || 0,
+    drop_row_rules: (all.rules || []).map((r, i) => ({ all_of: r.clauses, text: ruleText(r), rows_removed: all.ruleRemoved[i] || 0 })),
+    min_fixation_duration_ms: s.minDurationMs || 0, rows_removed_by_min_duration: g.durationRemoved || 0,
+    speed_filter_deg_per_s: s.velocity || 0, rows_removed_by_speed_filter: g.filtered || 0,
+    removed_observers: [...(state.removedObservers || [])],
+    observer_agreement: A ? {
+      method: 'per frame, the correlation between one observer\'s map and the summed map of all the other observers of the same condition (leave-one-out), each pixel weighted by its area on the sphere for 360° video; averaged over the frames where both have gaze. The current saliency settings shape the maps.',
+      map_width: A.W, map_height: A.H, frames_sampled: A.frameCount, frame_step: A.step,
+      low_rule: 'below the lower quartile minus 1.5 × the spread between the quartiles (box-plot rule), with at least 4 scored observers',
+      low_cutoff: Number.isFinite(A.low.cutoff) ? A.low.cutoff : null,
+      scores: Object.fromEntries(g.observers.map((o, i) => [o, Number.isFinite(A.scores[i]) ? +A.scores[i].toFixed(4) : null])),
+      frames_scored: Object.fromEntries(g.observers.map((o, i) => [o, A.frames[i]])),
+      low: [...A.low.set].map(i => g.observers[i]),
+      note: 'a flag only: nobody is removed automatically'
+    } : null
   };
 }
 $('copy-settings').addEventListener('click', async () => {

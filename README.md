@@ -55,6 +55,21 @@ The box **Only files whose path contains** overrides the automatic choice of fil
 
 **Something wrong?** **Copy debug details** (in the export panel and the help menu) copies a plain-text report: browser and the video codecs it can play, the video (size, frame rate, errors), every gaze file used with its row count, files that could not be read or had other columns, the column mapping and any mapping error, settings, motion analysis, and every notice and error so far. Paste it into a message or bug report.
 
+## Outliers
+
+The gaze is cleaned in a fixed order, and the gaze summary under the files says how many rows each step removed:
+
+1. Rows without a valid time or position (for example `nan` where the eye tracker lost the eye) are skipped.
+2. **Drop rows where** (gaze processing panel) removes rows by their values: *column* `<`, `>` or `=` *value*, for a confidence column (`confidence < 0.5`) or a value the eye tracker writes when it loses the eye. **＋ and** adds a part to a rule; a row is dropped only when every part holds, so a lost-eye 0,0 is `x = 0 and y = 0` (two separate rules would also drop real positions where only one of them is 0). Numbers are compared as numbers; `=` also matches text, ignoring case. A row is counted against the first rule that drops it.
+3. **Minimum fixation duration (ms)** drops fixations shorter than this (0 = off, e.g. 100 ms). Only for fixation files, with a duration or end column; it is greyed out for gaze samples.
+4. **Drop samples faster than (°/s)**: the speed filter, for raw gaze samples.
+
+**Observer agreement** (panel D): for each observer, the correlation between their map and the summed map of all the other observers (leave one out), at 128 × 64, averaged over up to 400 frames spread over the clip. It uses the current saliency settings (σ, pooling window, motion compensation). Observers are compared only with others of the same condition (in Salient360 the conditions are the left and right eye of the same people), each pixel is weighted by its area on the sphere for 360° video, and frames where the observer or the others have no gaze are left out instead of counting as 0. The score stands next to each observer; **sort by agreement** puts the lowest first, and scores far below the rest are marked ⚠: below the lower quartile minus 1.5 × the spread between the quartiles (the box-plot rule, needs at least 4 observers). This is a flag only: nobody is removed automatically; use × to remove an observer. There is deliberately no filter for gaze that is far from everyone else: in 360° video, people looking somewhere different is real data.
+
+The rules, the minimum duration, what each step removed, the removed observers and the agreement scores are written into `settings.json` (section `gaze_processing`); **Export settings** keeps the rules and the minimum duration, and **Import settings** restores them.
+
+![Outliers](docs/screenshots/16-outliers.png)
+
 ## Reference maps
 
 **Load reference** in panel E opens ground-truth maps to compare with, read frame by frame from disk (multi-gigabyte files are fine):

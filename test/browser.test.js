@@ -351,3 +351,65 @@ test('a folder of videos: fixations and references follow the chosen video; sett
     assert.match(await b.eval('document.querySelector("#preset").selectedOptions[0].parentElement.label'), /My templates/);
   } finally { b.close(); server.close(); }
 });
+
+test('outliers: drop rules and minimum duration report what they removed; agreement flags but never removes; settings.json keeps it all', opts, async () => {
+  const { server, url } = await serve(), b = await launch();
+  const dir = mkdtempSync(join(tmpdir(), 'overgaze-outliers-'));
+  try {
+    // the sample's 8 observers, plus observer 9 who looks at the far side, and three lost-eye rows at 0,0
+    const lines = readFileSync(join(ROOT, 'sample', 'sample_gaze.csv'), 'utf8').trim().split('\n');
+    const extra = lines.slice(1).filter(l => l.startsWith('1,')).map(l => { const c = l.split(','); c[0] = '9'; c[3] = String(((Number(c[3]) + 180 + 150) % 360) - 180); return c.join(','); });
+    extra.push('2,1.0,0.3,0,0', '2,2.0,0.3,0,0', '3,3.0,0.3,0,0');
+    writeFileSync(join(dir, 'extra.csv'), lines[0] + '\n' + extra.join('\n') + '\n');
+    const short = lines.slice(1).filter(l => Number(l.split(',')[2]) < 0.2).length + extra.filter(l => Number(l.split(',')[2]) < 0.2).length;
+    await b.goto(url + '?sample');
+    await b.waitFor('!!overgaze.state.gaze && document.querySelector("#video").readyState >= 2', 20000);
+    await b.waitFor('overgaze.state.agreement?.done', 30000, 'agreement on the sample');
+    assert.equal(await b.eval('overgaze.state.agreement.low.set.size'), 0, 'the simulated observers agree');
+    await b.setFiles('#gaze-input', [join(dir, 'extra.csv')]);
+    await b.waitFor('overgaze.state.files.length === 2 && overgaze.state.gaze.observers.length === 9', 10000, 'extra file added');
+    await b.waitFor('overgaze.state.agreement?.done && overgaze.state.agreement.gaze === overgaze.state.gaze', 30000, 'agreement with observer 9');
+    const nine = await b.eval('overgaze.state.gaze.observers.indexOf("9")');
+    assert.deepEqual(await b.eval('[...overgaze.state.agreement.low.set]'), [nine], 'observer 9 is marked low');
+    assert.match(await b.eval('document.querySelector("#agreement-status").textContent'), /1 far below the rest/);
+    assert.equal(await b.eval(`document.querySelector('[data-obs="${nine}"]').closest('.observer-row').classList.contains('flagged')`), true);
+    await b.click('#obs-sort');
+    assert.equal(await b.eval('document.querySelector("#observer-list .observer-row input").dataset.obs'), String(nine), 'sorted by agreement: lowest first');
+    assert.equal(await b.eval('overgaze.state.gaze.observers.length'), 9, 'nobody removed');
+
+    // drop rule built in the panel: longitude = 0 and latitude = 0
+    await b.click('#rule-add');
+    const setPart = (j, column, op, value) => b.eval(`(() => { const p = document.querySelectorAll('#rule-list .rule-part')[${j}]; for (const [k, v] of [['column', '${column}'], ['op', '${op}'], ['value', '${value}']]) { const e = p.querySelector('[data-k="' + k + '"]'); e.value = v; e.dispatchEvent(new Event('change', { bubbles: true })); } return 1; })()`);
+    await setPart(0, 'longitude', '=', '0');
+    await b.eval(`document.querySelector('#rule-list [data-and]').click(); 1`);
+    await setPart(1, 'latitude', '=', '0');
+    await b.waitFor('/Rule “longitude = 0 and latitude = 0” removed 3\\./.test(document.querySelector("#gaze-summary").textContent)', 5000, 'rule count in the summary');
+    // minimum duration
+    await b.eval(`document.querySelector('#min-dur').value = '200'; document.querySelector('#min-dur').dispatchEvent(new Event('change')); 1`);
+    const expected = short;   // the three 0,0 rows last 300 ms, so only the rule drops them
+    assert.match(await b.eval('document.querySelector("#gaze-summary").textContent'), new RegExp(`Minimum duration \\(200 ms\\) removed ${expected}\\.`));
+
+    await b.waitFor('overgaze.state.agreement?.done && overgaze.state.agreement.gaze === overgaze.state.gaze', 30000, 'agreement after filtering');
+    const sj = await b.eval('JSON.stringify(overgaze.settingsJson().gaze_processing)');
+    const gp = JSON.parse(sj);
+    assert.equal(gp.min_fixation_duration_ms, 200); assert.equal(gp.rows_removed_by_min_duration, expected);
+    assert.deepEqual(gp.drop_row_rules.map(r => [r.text, r.rows_removed]), [['longitude = 0 and latitude = 0', 3]]);
+    assert.ok(gp.observer_agreement.scores['9'] < gp.observer_agreement.scores['1']);
+    assert.deepEqual(gp.observer_agreement.low, ['9']);
+    assert.deepEqual(gp.removed_observers, []);
+
+    // export the settings, clear the rules, import: the rules and the minimum duration come back
+    await b.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: dir });
+    await b.click('#template-export');
+    for (let i = 0; i < 50 && !readdirSync(dir).some(f => f.endsWith('.overgaze.json')); i++) await new Promise(r => setTimeout(r, 100));
+    const saved = readdirSync(dir).find(f => f.endsWith('.overgaze.json'));
+    await b.eval(`document.querySelector('#rule-list [data-drop-rule]').click(); overgaze.applySettings({ minDurationMs: 0 }); 1`);
+    await b.waitFor('!/Rule/.test(document.querySelector("#gaze-summary").textContent)', 5000, 'rule removed');
+    await b.setFiles('#template-input', [join(dir, saved)]);
+    await b.waitFor('overgaze.state.settings.minDurationMs === 200 && overgaze.state.rowRules.length === 1 && /removed 3\\./.test(document.querySelector("#gaze-summary").textContent)', 5000, 'rules imported');
+    // removing is still the person's choice: × removes observer 9
+    await b.click(`[data-remove="${nine}"]`);
+    await b.waitFor('overgaze.state.gaze.observers.length === 9 && overgaze.state.removedObservers.has("9")', 5000, 'removed by hand');
+    assert.deepEqual(b.logs, []);
+  } finally { b.close(); server.close(); }
+});
