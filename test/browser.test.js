@@ -163,6 +163,26 @@ test('gaze files add up, observers can be removed, messages can be dismissed, a 
     assert.equal(await b.eval(`${count}([255, 0, 255])`), 0, 'reference outline off');
     assert.ok(await b.eval(`${count}([0, 255, 255])`) > 10, 'ours alone');
 
+    // the Gaze and Reference buttons hide everything of their side, outlines included, and leave the switches alone
+    const alphaOf = id => b.eval(`(() => { const c = document.querySelector('#${id}'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i]) n++; return n; })()`);
+    await b.eval(`document.querySelector('#ref-outline').click(); document.querySelector('#ref-heat').click(); overgaze.render(); 1`);
+    assert.ok(await b.eval(`${count}([255, 0, 255])`) > 10 && await alphaOf('ref-canvas') > 100, 'reference heatmap and outline on');
+    await b.click('#layer-ref'); await b.eval('overgaze.render(); 1');
+    assert.equal(await b.eval(`${count}([255, 0, 255])`), 0, 'Reference button hides the reference outline');
+    assert.equal(await alphaOf('ref-canvas'), 0, 'and the reference heatmap');
+    assert.ok(await b.eval(`${count}([0, 255, 255])`) > 10, 'our outline stays');
+    assert.equal(await b.eval(`document.querySelector('#ref-heat').checked && document.querySelector('#ref-outline').checked`), true, 'the reference switches are untouched');
+    assert.equal(await b.eval(`document.querySelector('#layer-ref').getAttribute('aria-pressed')`), 'false');
+    await b.click('#layer-gaze'); await b.eval('overgaze.render(); 1');
+    assert.equal(await b.eval(`${count}([0, 255, 255])`), 0, 'Gaze button hides our outline');
+    assert.equal(await alphaOf('heat-canvas'), 0, 'our heatmap');
+    assert.equal(await alphaOf('marks-canvas'), 0, 'and our gaze points');
+    await b.click('#layer-gaze'); await b.click('#layer-ref'); await b.eval('overgaze.render(); 1');
+    assert.ok(await b.eval(`${count}([255, 0, 255])`) > 10 && await b.eval(`${count}([0, 255, 255])`) > 10 && await alphaOf('ref-canvas') > 100, 'both sides back');
+    await b.click('#layer-ref'); await b.eval(`document.querySelector('#ref-outline').click(); document.querySelector('#ref-outline').click(); overgaze.render(); 1`);
+    assert.equal(await b.eval('overgaze.state.showRef'), true, 'switching a reference layer on shows the reference side again');
+    await b.eval(`document.querySelector('#ref-heat').click(); 1`);
+
     await b.click('#view-360');
     await b.waitFor('!document.querySelector("#view360-canvas").hidden', 3000);
     const px = await b.eval('(()=>{const c=document.querySelector("#view360-canvas");const g=c.getContext("webgl2");const p=new Uint8Array(4);g.readPixels(c.width>>1,c.height>>1,1,1,g.RGBA,g.UNSIGNED_BYTE,p);return [c.width,p[3]]})()');
