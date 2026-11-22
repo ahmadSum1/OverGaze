@@ -163,6 +163,18 @@ void main() {
     this.yaw = wrap180(this.yaw - dx * perPx);
     this.pitch = Math.max(-90, Math.min(90, this.pitch + dy * perPx));
   }
+  /** Screen (device) pixels per radian at the centre of the view, for drawing lines of a fixed on-screen width. */
+  pixelsPerRadian() {
+    const h = this.canvas.height || 1, w = this.canvas.width || 1, f = this.fov * Math.PI / 180, flat = VIEW_MODES[this.mode].flat;
+    if (flat) {
+      const aspect = w / h, box = aspect > flat ? [flat, 1] : [aspect, aspect / flat];
+      if (this.mode === 'cylinder') return box[0] * h / (2 * Math.PI);
+      return this.mode === 'eac' ? box[1] * h / Math.PI : box[1] * h / 4;     // a cube face is half the height
+    }
+    if (this.mode === 'planet') return (h / 2) / (2 * Math.tan(f / 4));
+    if (this.mode === 'fisheye') return (h / 2) / (f / 2);
+    return (h / 2) / Math.tan(f / 2);
+  }
   zoom(factor) { const [a, b] = VIEW_MODES[this.mode].fov; this.fov = Math.max(a, Math.min(b, this.fov * factor)); }
   /** Turn a step of the way towards (lon, lat) degrees. */
   follow(lon, lat, rate = 0.15) {

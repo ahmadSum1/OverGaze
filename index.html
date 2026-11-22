@@ -141,6 +141,7 @@
               <canvas id="erp-canvas" hidden></canvas>
               <canvas id="ref-canvas"></canvas>
               <canvas id="heat-canvas"></canvas>
+              <canvas id="outline-canvas"></canvas>
               <canvas id="marks-canvas"></canvas>
               <canvas id="view360-canvas" hidden></canvas>
             </div>
@@ -239,6 +240,7 @@
         <div class="setting-row"><label for="map-width">Live map width</label><select id="map-width" class="num-select"><option value="256">256</option><option value="512" selected>512</option><option value="1024">1024</option></select></div>
         <div class="setting-row"><label for="cov-thr">Coverage threshold (× frame max)</label><input id="cov-thr" class="num" type="number" min="0.01" max="0.99" step="0.01" value="0.1"></div>
         <div class="switch-color"><label class="view-switch"><span>Outline our coverage area</span><input id="show-outline" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label><input id="outline-color" type="color" value="#c8f56a" title="Colour of our outline" aria-label="Colour of our outline"></div>
+        <div class="setting-row"><label for="outline-width" title="Applies to our outline and the reference outline, in pixels on the screen: the same at every map size and zoom">Outline thickness (screen pixels)</label><input id="outline-width" class="num" type="number" min="0.5" max="20" step="0.5" value="2"></div>
         <label class="view-switch"><span>Show gaze points</span><input id="show-points" type="checkbox" role="switch" checked><span class="switch-track" aria-hidden="true"></span></label>
       </div>
 

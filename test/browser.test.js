@@ -151,8 +151,10 @@ test('gaze files add up, observers can be removed, messages can be dismissed, a 
     await b.waitFor('/CC (0\\.9|1\\.0)/.test(document.querySelector("#ro-ref").textContent)', 10000, 'high correlation with a matching reference').catch(async e => { console.log(await b.eval('document.querySelector("#ro-ref").textContent + " | " + document.querySelector("#ro-ref-detail").textContent + " | " + document.querySelector("#time-label").textContent')); throw e; });
 
     // the two outlines: separate switches and colours
-    const count = '(rgb => { const c = document.querySelector("#heat-canvas"), d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] === rgb[0] && d[i + 1] === rgb[1] && d[i + 2] === rgb[2] && d[i + 3] === 255) n++; return n; })';
+    const count = '(rgb => { const c = document.querySelector("#outline-canvas"), d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] === rgb[0] && d[i + 1] === rgb[1] && d[i + 2] === rgb[2] && d[i + 3] === 255) n++; return n; })';
     const setColor = (id, v) => b.eval(`document.querySelector('#${id}').value = '${v}'; document.querySelector('#${id}').dispatchEvent(new Event('input')); overgaze.render(); 1`);
+    // a narrower σ than the reference's, so the two outlines do not lie on top of each other
+    await b.eval('overgaze.applySettings({ sigmaDeg: 3 }); 1');
     await setColor('ref-outline-color', '#ff00ff'); await setColor('outline-color', '#00ffff');
     assert.ok(await b.eval(`${count}([255, 0, 255])`) > 10, 'reference outline in its colour');
     assert.ok(await b.eval(`${count}([0, 255, 255])`) > 10, 'our outline (switched on with the reference) in its colour');
@@ -162,6 +164,15 @@ test('gaze files add up, observers can be removed, messages can be dismissed, a 
     await b.eval(`document.querySelector('#ref-outline').click(); document.querySelector('#show-outline').click(); overgaze.render(); 1`);
     assert.equal(await b.eval(`${count}([255, 0, 255])`), 0, 'reference outline off');
     assert.ok(await b.eval(`${count}([0, 255, 255])`) > 10, 'ours alone');
+
+    // ink on the outline layer (only our outline is on now): the sum of alpha, which is the line's length times its width
+    const inkOf = '(() => { const c = document.querySelector("#outline-canvas"), d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 3; i < d.length; i += 4) n += d[i] / 255; return n; })()';
+    // outline thickness is in screen pixels: three times as thick at 6 as at 2, and the same at every live map width
+    const thick = async (w, mapWidth) => { await b.eval(`for (const [id, v] of [['outline-width', '${w}'], ['map-width', '${mapWidth}']]) { const e = document.querySelector('#' + id); e.value = v; e.dispatchEvent(new Event('change')); } overgaze.render(); 1`); return b.eval(inkOf); };
+    const t2 = await thick(2, 512), t6 = await thick(6, 512), t2small = await thick(2, 256), t2big = await thick(2, 1024);
+    assert.ok(t6 > 2.5 * t2 && t6 < 3.5 * t2, `6 px outline vs 2 px: ${t6} vs ${t2} pixels of ink`);
+    assert.ok(Math.abs(t2small - t2) < 0.2 * t2 && Math.abs(t2big - t2) < 0.2 * t2, `same thickness at map widths 256 / 512 / 1024: ${t2small} / ${t2} / ${t2big}`);
+    await thick(2, 512);
 
     // the Gaze and Reference buttons hide everything of their side, outlines included, and leave the switches alone
     const alphaOf = id => b.eval(`(() => { const c = document.querySelector('#${id}'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i]) n++; return n; })()`);
@@ -187,6 +198,10 @@ test('gaze files add up, observers can be removed, messages can be dismissed, a 
     await b.waitFor('!document.querySelector("#view360-canvas").hidden', 3000);
     const px = await b.eval('(()=>{const c=document.querySelector("#view360-canvas");const g=c.getContext("webgl2");const p=new Uint8Array(4);g.readPixels(c.width>>1,c.height>>1,1,1,g.RGBA,g.UNSIGNED_BYTE,p);return [c.width,p[3]]})()');
     assert.ok(px[0] > 100 && px[1] === 255, `360° view drew something: ${px}`);
+    // the outline in the 360° view keeps its screen thickness when zooming: the view reports its pixels per radian
+    const ppr = await b.eval('(() => { const v = overgaze.state.view; v.setMode("perspective"); v.fov = 90; const a = v.pixelsPerRadian(); v.fov = 45; const b = v.pixelsPerRadian(); v.fov = 90; return [a, b, v.canvas.height]; })()');
+    assert.ok(Math.abs(ppr[0] - ppr[2] / 2) < 1, `at 90° the half-height covers 1 radian's tangent: ${ppr}`);
+    assert.ok(Math.abs(ppr[1] / ppr[0] - 1 / Math.tan(Math.PI / 8)) < 1e-6, `zooming in to 45° gives ${ppr[1] / ppr[0]} times the pixels per radian`);
     // other views: little planet and fisheye draw too; layers can be switched off
     for (const mode of ['planet', 'fisheye']) {
       await b.eval(`document.querySelector('#view360-mode').value = '${mode}'; document.querySelector('#view360-mode').dispatchEvent(new Event('change')); 1`);

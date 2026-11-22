@@ -314,3 +314,25 @@ test('presets, imported settings and references matched to a video', async () =>
   assert.deepEqual(referencesFor(files, '001').map(x => x.webkitRelativePath), ['maps_mc3_vret/vret_001/sal.npy']);
   assert.deepEqual(referencesFor(files, '7_GazaFishermen'), []);
 });
+
+test('outline lines: a closed border between pixel centres, across the 360° seam, closed at the frame edge', async () => {
+  const { contourSegments } = await import('../src/contour.js');
+  const W = 8, H = 6, m = new Float32Array(W * H);
+  for (const [x, y] of [[3, 2], [4, 2], [3, 3], [4, 3]]) m[y * W + x] = 1;
+  const s = contourSegments(m, W, H, 0.5);
+  assert.equal(s.length / 4, 8, 'a 2 × 2 block gives an eight-sided ring');
+  const xs = Array.from(s).filter((_, i) => i % 2 === 0), ys = Array.from(s).filter((_, i) => i % 2 === 1);
+  assert.deepEqual([Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)], [3, 5, 2, 4], 'halfway between inside and outside centres');
+  // the end points pair up: every point is shared by exactly two segments (a closed line)
+  const key = i => `${s[i]},${s[i + 1]}`, seen = new Map();
+  for (let i = 0; i < s.length; i += 2) seen.set(key(i), (seen.get(key(i)) || 0) + 1);
+  assert.ok([...seen.values()].every(n => n === 2), 'closed');
+  const seam = new Float32Array(W * H); seam[2 * W] = 1; seam[2 * W + 7] = 1;
+  const w = Array.from(contourSegments(seam, W, H, 0.5, true)).filter((_, i) => i % 2 === 0);
+  assert.ok(Math.min(...w) < 0.5 && Math.max(...w) > 7.5, 'a spot on the seam is outlined on both sides');
+  const flat = Array.from(contourSegments(seam, W, H, 0.5, false)).filter((_, i) => i % 2 === 0);
+  assert.equal(Math.min(...flat), 0.5, 'without wrap-around the line closes along the edge pixels');
+  const edge = new Float32Array(W * H).fill(1);
+  assert.ok(contourSegments(edge, W, H, 0.5).length > 0, 'an area filling the frame still gets a border');
+  assert.equal(contourSegments(new Float32Array(W * H), W, H, 0.5).length, 0);
+});

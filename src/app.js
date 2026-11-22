@@ -8,18 +8,19 @@ import { PRESETS, pickSettings, presetDifferences, settingsFromJson } from './pr
 import { LayoutConverter, VIEW_MODES, View360 } from './view360.js';
 import { CUBE_LAYOUTS, DEFAULT_OPTIONS, LAYOUTS, erpSize, faceTables } from './projections.js';
 import { COLORMAPS, colorize, cssGradient } from './colormap.js';
+import { contourSegments, strokeSegments } from './contour.js';
 
 const VERSION = '1.0.0';
 const $ = id => document.getElementById(id);
 const video = $('video');
-const refCanvas = $('ref-canvas'), heatCanvas = $('heat-canvas'), marksCanvas = $('marks-canvas'), densityCanvas = $('density-canvas');
+const refCanvas = $('ref-canvas'), heatCanvas = $('heat-canvas'), outlineCanvas = $('outline-canvas'), marksCanvas = $('marks-canvas'), densityCanvas = $('density-canvas');
 const GAZE_EXT = /\.(csv|tsv|txt|json|arff|dat)$/i, VIDEO_EXT = /\.(mp4|m4v|webm|mkv|mov|ogv)$/i;
 
 const state = {
   video: null, fps: 30, fpsSource: 'default', fpsDeltas: [], lastFrameMeta: null, mediaTime: 0,
   files: [], mapping: null, gazeAll: null, gaze: null, observerEnabled: null, conditionEnabled: null,
   settings: { ...DEFAULTS, velocity: 0 },
-  display: { outline: false, outlineColor: '#c8f56a', outlineTouched: false, mode: 'heat', colormap: 'jet', opacity: 0.65, gamma: 1, mapWidth: 512, showPoints: true, showFlow: false },
+  display: { outline: false, outlineColor: '#c8f56a', outlineTouched: false, outlineWidth: 2, mode: 'heat', colormap: 'jet', opacity: 0.65, gamma: 1, mapWidth: 512, showPoints: true, showFlow: false },
   flow: null, flowInfo: null, analysing: null, exporting: null, recording: null,
   work: {}, last: null, renderQueued: false, projectionTouched: false, density: null,
   library: { videos: [], gaze: [], refs: [] }, tiedTo: null,
@@ -346,12 +347,13 @@ function render() {
     $('readout-badge').textContent = `σ ${state.settings.sigmaDeg}° · ±${state.settings.windowSec} s${state.settings.causal ? ' past' : ''}${state.settings.motionComp && state.flow ? ' · motion-comp.' : ''}`;
   }
   const wrapX = state.settings.projection === 'erp', refOutline = !!(state.ref && state.showRef && state.refShow.outline);
-  const rgb = hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
   if (state.showGaze && state.display.mode !== 'off' && result) colorize(result.map, img.data, colorOpts);
-  // the two outlines are independent: each has its own switch and colour
-  if (refOutline && ref) outline(ref.map, W, H, thr, rgb(state.refShow.outlineColor), img.data, wrapX);
-  if (state.showGaze && state.display.outline && result && result.max > 0) outline(result.map, W, H, thr, rgb(state.display.outlineColor), img.data, wrapX);
   hctx.putImageData(img, 0, 0);
+  // the two outlines are independent (each has its own switch and colour); they are traced here as lines and drawn
+  // on their own screen-sized layer, so their thickness is in screen pixels whatever the map size or zoom
+  state.outlines = { W, H, lines: [] };
+  if (refOutline && ref) state.outlines.lines.push({ segs: outlineOf(ref.map, W, H, thr, wrapX), color: state.refShow.outlineColor });
+  if (state.showGaze && state.display.outline && result && result.max > 0) state.outlines.lines.push({ segs: outlineOf(result.map, W, H, thr, wrapX), color: state.display.outlineColor });
   // the reference heatmap has its own layer (under ours) and its own colours
   const rctx = refCanvas.getContext('2d');
   if (state.ref && state.showRef && state.refShow.heat && ref) {
@@ -362,6 +364,7 @@ function render() {
   } else rctx.clearRect(0, 0, refCanvas.width, refCanvas.height);
   updateReferenceReadout(ref, result);
   state.last = { t, k, result, W, H };
+  drawOutlineLayer();
   drawMarks(t, result);
   drawPlayhead();
   if (state.view) draw360(result, W, H);
@@ -375,22 +378,26 @@ function normalised(map) {
   for (let i = 0; i < map.length; i++) out[i] = map[i] / mx;
   return out;
 }
-/** Paint the border of the area at or above frac × max (two pixels wide; wraps left/right for 360° maps). */
-function outline(map, W, H, frac, rgb, data, wrap) {
+/** The border of the area at or above frac × max, as line segments (wraps left/right for 360° maps). */
+function outlineOf(map, W, H, frac, wrap) {
   let mx = 0;
   for (const v of map) if (v > mx) mx = v;
-  if (!(mx > 0)) return;
-  const t = frac * mx, inside = (x, y) => {
-    if (y < 0 || y >= H) return false;
-    if (x < 0 || x >= W) { if (!wrap) return false; x = (x + W) % W; }
-    return map[y * W + x] >= t;
-  };
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const a = inside(x, y);
-    if (a === inside(x + 1, y) && a === inside(x, y + 1) && a === inside(x - 1, y) && a === inside(x, y - 1)) continue;
-    const j = 4 * (y * W + x);
-    data[j] = rgb[0]; data[j + 1] = rgb[1]; data[j + 2] = rgb[2]; data[j + 3] = 255;
-  }
+  return mx > 0 ? contourSegments(map, W, H, frac * mx, wrap) : new Float32Array(0);
+}
+/** Draw the current outlines onto a context of cw × ch pixels, lineWidth in that context's pixels. */
+function drawOutlines(g, cw, ch, lineWidth) {
+  const o = state.outlines;
+  if (!o) return;
+  for (const l of o.lines) strokeSegments(g, l.segs, o.W, o.H, cw, ch, lineWidth, l.color);
+}
+/** The on-screen outline layer: as big as the stage in device pixels, lines `outlineWidth` screen pixels wide. */
+function drawOutlineLayer() {
+  const rect = $('stage').getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  const cw = Math.max(1, Math.round(rect.width * dpr)), ch = Math.max(1, Math.round(rect.height * dpr));
+  if (outlineCanvas.width !== cw || outlineCanvas.height !== ch) { outlineCanvas.width = cw; outlineCanvas.height = ch; }
+  const g = outlineCanvas.getContext('2d');
+  g.clearRect(0, 0, cw, ch);
+  if (!state.view) drawOutlines(g, cw, ch, state.display.outlineWidth * dpr);   // the 360° view draws its own
 }
 
 // ---------- reference maps ----------
@@ -554,6 +561,7 @@ $('ref-heat').addEventListener('change', e => { state.refShow.heat = e.target.ch
 $('ref-outline').addEventListener('change', e => { state.refShow.outline = e.target.checked; if (e.target.checked) state.showRef = true; syncLayerChips(); requestRender(); });
 $('ref-outline-color').addEventListener('input', e => { state.refShow.outlineColor = e.target.value; requestRender(); });
 $('outline-color').addEventListener('input', e => { state.display.outlineColor = e.target.value; requestRender(); });
+$('outline-width').addEventListener('change', e => { state.display.outlineWidth = Math.min(20, Math.max(0.5, Number(e.target.value) || 2)); e.target.value = String(state.display.outlineWidth); requestRender(); });
 $('ref-colormap').innerHTML = COLORMAPS.map(c => `<option value="${c}">${c[0].toUpperCase() + c.slice(1)}</option>`).join('');
 $('ref-colormap').value = 'ice';
 $('ref-colormap').addEventListener('change', e => { state.refColormap = e.target.value; requestRender(); });
@@ -591,9 +599,10 @@ function set360(on) {
 }
 function draw360(result, W, H) {
   const v = state.view, src = state.viewSource;
-  const [vw, vh] = videoSize(), sw = Math.min(vw, 2048), sh = Math.round(sw / 2);
+  const sw = 2048, sh = 1024;   // fixed, even for small videos, so thin outlines stay sharp when zoomed in
   if (src.width !== sw || src.height !== sh) { src.width = sw; src.height = sh; }
-  drawComposite(src);
+  // outline thickness in screen pixels at the centre of the view: source pixels per radian over screen pixels per radian
+  drawComposite(src, state.display.outlineWidth * (window.devicePixelRatio || 1) * (sw / (2 * Math.PI)) / v.pixelsPerRadian());
   if ($('view360-follow').checked && result && result.max > 0) {
     let a = 0;
     for (let i = 1; i < result.map.length; i++) if (result.map[i] > result.map[a]) a = i;
@@ -613,7 +622,7 @@ $('view-360').addEventListener('click', () => set360(!state.view));
     $('view360-follow').checked = false; redraw360();
   });
   glCanvas.addEventListener('pointerup', () => { drag = null; });
-  glCanvas.addEventListener('wheel', e => { if (!state.view) return; e.preventDefault(); state.view.zoom(Math.exp(e.deltaY * 0.001)); redraw360(); }, { passive: false });
+  glCanvas.addEventListener('wheel', e => { if (!state.view) return; e.preventDefault(); state.view.zoom(Math.exp(e.deltaY * 0.001)); requestRender(); }, { passive: false });   // redraws the outlines for the new zoom
   glCanvas.addEventListener('dblclick', () => { if (!state.view) return; state.view.yaw = 0; state.view.setMode(state.view.mode); redraw360(); });
 }
 
@@ -1387,11 +1396,17 @@ function compositeCanvas(maxWidth = 3840) {
   const c = document.createElement('canvas'); c.width = cw; c.height = ch;
   return c;
 }
-function drawComposite(c) {
+/**
+ * Video with all overlays at c's size. `outlineWidth` is the outline thickness in c's pixels; by default the
+ * outlines keep the thickness they have on screen relative to the picture.
+ */
+function drawComposite(c, outlineWidth) {
   const g = c.getContext('2d');
   g.drawImage(converting() ? $('erp-canvas') : video, 0, 0, c.width, c.height);
   if (state.ref && state.showRef && state.refShow.heat) g.drawImage(refCanvas, 0, 0, c.width, c.height);
   { g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high'; g.drawImage(heatCanvas, 0, 0, c.width, c.height); }
+  const stageWidth = $('stage').getBoundingClientRect().width || c.width;
+  drawOutlines(g, c.width, c.height, outlineWidth ?? state.display.outlineWidth * c.width / stageWidth);
   g.drawImage(marksCanvas, 0, 0, c.width, c.height);
 }
 $('export-snapshot').addEventListener('click', () => {
@@ -1553,7 +1568,7 @@ $('layout').addEventListener('change', e => setLayout(e.target.value, true));
   const opt = ([k, v]) => `<option value="${k}">${v.label}</option>`, all = Object.entries(VIEW_MODES);
   $('view360-mode').innerHTML = `<optgroup label="Look around">${all.filter(([, v]) => !v.group).map(opt).join('')}</optgroup><optgroup label="Unfolded (whole sphere)">${all.filter(([, v]) => v.group).map(opt).join('')}</optgroup>`;
 }
-$('view360-mode').addEventListener('change', e => { if (state.view) { state.view.setMode(e.target.value); $('view360-follow').checked = false; redraw360(); } });
+$('view360-mode').addEventListener('change', e => { if (state.view) { state.view.setMode(e.target.value); $('view360-follow').checked = false; requestRender(); } });
 
 // layout options: cube face order and mirroring (like egjs-view360's cubemapOrder / cubemapFlipX), cylinder coverage
 function setLayoutOption(o) {
