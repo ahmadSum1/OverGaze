@@ -21,7 +21,7 @@ button:focus-visible,select:focus-visible,input:focus-visible,a:focus-visible,su
 .side-section,.settings-section{padding:16px 20px 18px;border-top:1px solid #252831;display:grid;gap:9px}
 .section-title{display:flex;align-items:center;gap:8px;font:600 13px var(--head);color:#e9ebe4}.section-icon{width:22px;height:22px;display:grid;place-items:center;border-radius:5px;background:#2a3125;color:var(--lime);font-size:12px}.section-number{margin-left:auto;font:700 10px var(--font);color:#5d626b}
 .input-label{font-size:9px;font-weight:700;letter-spacing:1.1px;color:#878c95;margin-top:3px}
-.hint{font-size:11px;line-height:1.55;color:#8b9099;margin:0}.dialog-error{font-size:11px;color:#ffb4b4;background:#3d2427;border:1px solid #7d4245;border-radius:6px;padding:7px 9px;margin:0}
+.hint{font-size:11px;line-height:1.55;color:#8b9099;margin:0}.warn-text{color:#f5d76e}.dialog-error{font-size:11px;color:#ffb4b4;background:#3d2427;border:1px solid #7d4245;border-radius:6px;padding:7px 9px;margin:0}
 select,input[type=url],input[type=number],input[type=text]{width:100%;background:#1f222a;border:1px solid #363a44;color:#e7e9e3;border-radius:6px;padding:7px 8px;font-size:12px}
 .select-wrap select{appearance:auto}
 .url-row{display:grid;grid-template-columns:1fr auto;gap:6px}

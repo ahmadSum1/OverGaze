@@ -132,6 +132,10 @@ The **Preset** list (top of the settings) sets everything that changes the maps 
 | Live mask | 3° | past 1 s, fading | causal | what a real-time mask could use |
 | OverGaze defaults | 2° | this frame | | |
 
+Once any of these settings differs from the chosen preset or template, the menu shows **(custom <preset name>)** and a line under it lists what changed. Choosing the preset itself again restores its values. Only the settings a preset sets are compared: the defaults say nothing about the projection, so they stay "not custom" on 2D video. A motion-compensated preset is not counted as changed while it waits for **Analyse motion**.
+
+![Custom preset](docs/screenshots/13-custom-preset.png)
+
 **Save as template** keeps the current settings under a name in this browser (they appear under *My templates*; **Delete** removes one). **Export settings** downloads them as a small `.overgaze.json` file; **Import settings** reads such a file, or the `settings.json` of any map export, applies it and keeps it as a template.
 
 ![Pooling settings](docs/screenshots/06-pooling-settings.png)

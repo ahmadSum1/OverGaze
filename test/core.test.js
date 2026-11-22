@@ -301,6 +301,13 @@ test('presets, imported settings and references matched to a video', async () =>
   assert.deepEqual(fromExport.settings, { projection: 'erp', sigmaDeg: 3, windowSec: 1, kernel: 'gaussian', motionComp: true, coverageThreshold: 0.2 });
   assert.deepEqual(settingsFromJson({ overgaze_template: 1, name: 'x', settings: { sigmaDeg: 4, junk: 1 } }), { name: 'x', settings: { sigmaDeg: 4 } });
   assert.throws(() => settingsFromJson({ hello: 1 }), /no OverGaze settings/);
+  // what makes a preset "custom": only the keys the preset sets, numbers compared as numbers
+  const { presetDifferences } = await import('../src/presets.js');
+  assert.deepEqual(presetDifferences(he.settings, { ...he.settings }), []);
+  assert.deepEqual(presetDifferences(he.settings, { ...he.settings, sigmaDeg: '2', lonOffsetDeg: 30 }), [], 'the same σ as text; rotation is not part of the preset');
+  assert.deepEqual(presetDifferences(he.settings, { ...he.settings, sigmaDeg: 2.5, causal: true }), ['sigmaDeg', 'causal']);
+  const defaults = PRESETS.find(p => p.id === 'default');
+  assert.deepEqual(presetDifferences(defaults.settings, { ...defaults.settings, projection: 'planar' }), [], 'the defaults fit 2D video too');
   const f = path => ({ name: path.split('/').pop(), webkitRelativePath: path });
   const files = ['SalMaps/2_Diner_2048x1024x600_32b.bin', 'SalMaps/2_Diner_saliency.png', 'SalMaps/12_TeatroRegioTorino_2048x1024x600_32b.bin', 'maps_mc3_vret/vret_001/sal.npy', 'maps_mc3_vret/vret_0010/sal.npy'].map(f);
   assert.deepEqual(referencesFor(files, '2_Diner').map(x => x.name), ['2_Diner_2048x1024x600_32b.bin'], 'the .bin is preferred to the static image');

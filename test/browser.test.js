@@ -290,6 +290,20 @@ test('a folder of videos: fixations and references follow the chosen video; sett
     // presets and settings files
     await b.eval(`document.querySelector('#preset').value = 'p:salient360-he'; document.querySelector('#preset').dispatchEvent(new Event('change')); 1`);
     assert.equal(await b.eval('overgaze.state.settings.sigmaDeg'), 2);
+    // a changed setting turns the menu into "(custom …)"; choosing the preset again restores its values
+    const menuText = 'document.querySelector("#preset").selectedOptions[0].textContent';
+    await b.eval(`document.querySelector('#sigma-num').value = '3.5'; document.querySelector('#sigma-num').dispatchEvent(new Event('change')); 1`);
+    assert.equal(await b.eval('overgaze.state.settings.sigmaDeg'), 3.5);
+    assert.equal(await b.eval(menuText), '(custom Salient360: head + eye maps (σ 2°, per frame))');
+    assert.match(await b.eval('document.querySelector("#preset").title'), /σ/);
+    await b.eval(`document.querySelector('#preset').value = 'p:salient360-he'; document.querySelector('#preset').dispatchEvent(new Event('change')); 1`);
+    assert.equal(await b.eval('overgaze.state.settings.sigmaDeg'), 2, 'preset values restored');
+    assert.equal(await b.eval(menuText), 'Salient360: head + eye maps (σ 2°, per frame)');
+    assert.equal(await b.eval('document.querySelectorAll("#preset option[data-custom]").length'), 0);
+    // the motion-compensated preset is not "custom" just because the motion has not been analysed yet
+    await b.eval(`document.querySelector('#preset').value = 'p:video-sal-mc3'; document.querySelector('#preset').dispatchEvent(new Event('change')); 1`);
+    assert.equal(await b.eval(menuText), 'Video-saliency training maps “mc3” (σ 3°, ±1 s, motion comp.)');
+    await b.eval(`document.querySelector('#preset').value = 'p:salient360-he'; document.querySelector('#preset').dispatchEvent(new Event('change')); 1`);
     await b.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: dir });
     await b.eval('overgaze.applySettings({ sigmaDeg: 4.5, windowSec: 0.7 }); 1');
     await b.click('#template-export');

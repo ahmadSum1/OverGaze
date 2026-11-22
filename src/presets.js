@@ -68,3 +68,21 @@ export function settingsFromJson(obj) {
   if (!Object.keys(plain).length) throw new Error('no OverGaze settings found in it');
   return { settings: plain };
 }
+
+/**
+ * The settings in which `current` differs from a preset or template. Only the keys the preset sets are compared:
+ * a preset that leaves out the projection (the defaults) fits 360° and 2D video alike. Numbers are compared as
+ * numbers, so 2 and "2" are the same value.
+ */
+export function presetDifferences(presetSettings, current) {
+  const out = [];
+  for (const key of SETTING_KEYS) {
+    if (!presetSettings || !(key in presetSettings)) continue;
+    const a = presetSettings[key], b = current[key];
+    const numeric = v => (typeof v === 'number' || (typeof v === 'string' && v.trim() !== '')) && Number.isFinite(Number(v));
+    const same = typeof a === 'boolean' ? !!a === !!b
+      : numeric(a) && numeric(b) ? Math.abs(Number(a) - Number(b)) < 1e-9 : a === b;
+    if (!same) out.push(key);
+  }
+  return out;
+}

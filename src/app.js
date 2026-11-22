@@ -4,7 +4,7 @@ import { FlowStore, toGray } from './flow.js';
 import { ZipWriter, encodeGrayPng, npyHeader } from './export.js';
 import { fpsFromDeltas } from './timing.js';
 import { compareMaps, openReference, referencesFor, resample } from './reference.js';
-import { PRESETS, pickSettings, settingsFromJson } from './presets.js';
+import { PRESETS, pickSettings, presetDifferences, settingsFromJson } from './presets.js';
 import { LayoutConverter, VIEW_MODES, View360 } from './view360.js';
 import { CUBE_LAYOUTS, DEFAULT_OPTIONS, LAYOUTS, erpSize, faceTables } from './projections.js';
 import { COLORMAPS, colorize, cssGradient } from './colormap.js';
@@ -308,6 +308,7 @@ function seekSeconds(dt) { if (!state.video) return; video.currentTime = Math.ma
 
 // ---------- rendering ----------
 function requestRender() {
+  refreshPresetLabel();
   if (state.renderQueued) return;
   state.renderQueued = true;
   requestAnimationFrame(() => { state.renderQueued = false; render(); });
@@ -1023,7 +1024,7 @@ $('kernel').addEventListener('change', e => { state.settings.kernel = e.target.v
 $('causal').addEventListener('change', e => { state.settings.causal = e.target.checked; onSettings(); });
 $('duration-weight').addEventListener('change', e => { state.settings.durationWeight = e.target.checked; onSettings(); });
 $('fps').addEventListener('change', e => { const f = Number(e.target.value); if (f > 0) { setFps(f, 'manual'); if (/^frame/.test(state.mapping?.timeUnit) || /^frame/.test(state.mapping?.durationUnit)) rebuildGaze(); } });
-$('motion').addEventListener('change', e => { state.settings.motionComp = e.target.checked; onSettings(); });
+$('motion').addEventListener('change', e => { state.settings.motionComp = e.target.checked; state.wantMotion = e.target.checked; onSettings(); });
 $('show-flow').addEventListener('change', e => { state.display.showFlow = e.target.checked; requestRender(); });
 $('vel').addEventListener('change', e => { state.settings.velocity = Math.max(0, Number(e.target.value) || 0); if (state.gazeAll) { state.gaze = velocityFilter(state.gazeAll, state.settings.velocity); updateGazeSummary(); drawDensity(); } onSettings(); });
 $('flip-x').addEventListener('change', e => { state.settings.flipX = e.target.checked; onSettings(); });
@@ -1066,20 +1067,51 @@ function renderPresetList(selected = '') {
   const t = loadTemplates(), esc = escapeHtml;
   $('preset').innerHTML = `<option value="">— choose a preset or template —</option><optgroup label="Presets">${PRESETS.map(p => `<option value="p:${p.id}">${esc(p.name)}</option>`).join('')}</optgroup>`
     + (t.length ? `<optgroup label="My templates">${t.map((x, i) => `<option value="t:${i}">${esc(x.name)}</option>`).join('')}</optgroup>` : '');
+  state.presetBase = selected || null; state.presetCustom = null;
   $('preset').value = selected;
   $('template-delete').disabled = !selected.startsWith('t:');
+  refreshPresetLabel();
 }
-function chosenPreset() {
-  const v = $('preset').value;
+function presetByValue(v) {
+  if (!v) return null;
   if (v.startsWith('p:')) return PRESETS.find(p => p.id === v.slice(2));
   if (v.startsWith('t:')) return loadTemplates()[Number(v.slice(2))];
   return null;
 }
+/** The preset or template the settings came from (also while they have been changed since). */
+function chosenPreset() { return presetByValue(state.presetBase); }
+const SETTING_LABELS = { projection: 'projection', sigmaDeg: 'σ', truncate: 'kernel cut-off', planarFovDeg: 'field of view', windowSec: 'pooling window',
+  kernel: 'pooling weight', causal: 'past only', durationWeight: 'weight by duration', motionComp: 'motion compensation', lonOffsetDeg: 'rotation',
+  flipX: 'left–right flip', flipY: 'up–down flip', velocity: 'speed filter', coverageThreshold: 'coverage threshold' };
+/**
+ * Once any setting differs from the chosen preset, the menu shows "(custom <preset name>)" as a separate entry,
+ * so that choosing the preset itself again is a change of the menu and restores its values.
+ */
+function refreshPresetLabel() {
+  const sel = $('preset'), p = presetByValue(state.presetBase);
+  // motion compensation that waits for "Analyse motion" still counts as on
+  const diff = p ? presetDifferences(p.settings, { ...state.settings, motionComp: state.settings.motionComp || !!state.wantMotion }) : [];
+  const key = diff.length ? `${state.presetBase}|${diff.join()}` : null;
+  if (key === state.presetCustom) return;
+  state.presetCustom = key;
+  sel.querySelector('option[data-custom]')?.remove();
+  if (!diff.length) { sel.value = state.presetBase || ''; sel.title = ''; $('preset-changes').hidden = true; return; }
+  const o = document.createElement('option');
+  o.value = `c:${state.presetBase}`; o.dataset.custom = '1'; o.textContent = `(custom ${p.name})`;
+  sel.insertBefore(o, sel.children[1] || null);   // right after the placeholder, outside the groups
+  sel.value = o.value;
+  sel.title = `Changed from “${p.name}”: ${diff.map(k => SETTING_LABELS[k] || k).join(', ')}. Choose the preset again to restore its values.`;
+  $('preset-changes').hidden = false; $('preset-changes').textContent = `Changed: ${diff.map(k => SETTING_LABELS[k] || k).join(', ')}. Choose the preset again to restore its values.`;
+}
 $('preset').addEventListener('change', () => {
+  const v = $('preset').value;
+  if (v.startsWith('c:')) return;          // the "(custom …)" entry itself: nothing to apply
+  state.presetBase = v || null;
   const p = chosenPreset();
-  $('template-delete').disabled = !$('preset').value.startsWith('t:');
+  $('template-delete').disabled = !v.startsWith('t:');
   $('preset-about').textContent = p ? (p.about || 'Saved template.') + (p.settings.motionComp && !state.flow ? ' Motion compensation starts once “Analyse motion” has run.' : '') : '';
   if (p) applySettings(p.settings);
+  refreshPresetLabel();
 });
 $('template-save').addEventListener('click', () => {
   const name = prompt('Name of the template:', `σ ${state.settings.sigmaDeg}° · ±${state.settings.windowSec} s`);
@@ -1089,13 +1121,13 @@ $('template-save').addEventListener('click', () => {
   if (storeTemplates(list)) { renderPresetList(`t:${list.length - 1}`); notice(`Template “${name}” saved in this browser.`); }
 });
 $('template-delete').addEventListener('click', () => {
-  const v = $('preset').value;
+  const v = state.presetBase || '';
   if (!v.startsWith('t:')) return;
   const list = loadTemplates(), [gone] = list.splice(Number(v.slice(2)), 1);
   if (storeTemplates(list)) { renderPresetList(); $('preset-about').textContent = ''; notice(`Template “${gone?.name}” deleted.`); }
 });
 $('template-export').addEventListener('click', () => {
-  const p = chosenPreset(), name = p?.name || `OverGaze settings ${new Date().toISOString().slice(0, 10)}`;
+  const p = chosenPreset(), name = (p && state.presetCustom ? `custom ${p.name}` : p?.name) || `OverGaze settings ${new Date().toISOString().slice(0, 10)}`;
   const body = { overgaze_template: 1, name, settings: pickSettings({ ...state.settings, motionComp: state.settings.motionComp || !!state.wantMotion }) };
   download(new Blob([JSON.stringify(body, null, 2)], { type: 'application/json' }), `${name.replace(/[^\w.-]+/g, '_').slice(0, 60)}.overgaze.json`);
 });
