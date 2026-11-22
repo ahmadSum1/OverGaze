@@ -26,7 +26,7 @@ const state = {
   flow: null, flowInfo: null, analysing: null, exporting: null, recording: null,
   work: {}, last: null, renderQueued: false, projectionTouched: false, density: null,
   library: { videos: [], gaze: [], refs: [] }, tiedTo: null,
-  ref: null, refShow: { heat: false, outline: true, outlineColor: '#ffffff' }, showGaze: true, showRef: true, removedObservers: new Set(), view: null,
+  ref: null, refShow: { heat: false, outline: true, outlineColor: '#ffffff', outlineWidth: 2 }, showGaze: true, showRef: true, removedObservers: new Set(), view: null,
   layout: 'erp', layoutTouched: false, layoutOpts: { ...DEFAULT_OPTIONS }, converter: null
 };
 
@@ -354,8 +354,8 @@ function render() {
   // the two outlines are independent (each has its own switch and colour); they are traced here as lines and drawn
   // on their own screen-sized layer, so their thickness is in screen pixels whatever the map size or zoom
   state.outlines = { W, H, lines: [] };
-  if (refOutline && ref) state.outlines.lines.push({ segs: outlineOf(ref.map, W, H, thr, wrapX), color: state.refShow.outlineColor });
-  if (state.showGaze && state.display.outline && result && result.max > 0) state.outlines.lines.push({ segs: outlineOf(result.map, W, H, thr, wrapX), color: state.display.outlineColor });
+  if (refOutline && ref) state.outlines.lines.push({ segs: outlineOf(ref.map, W, H, thr, wrapX), color: state.refShow.outlineColor, width: state.refShow.outlineWidth });
+  if (state.showGaze && state.display.outline && result && result.max > 0) state.outlines.lines.push({ segs: outlineOf(result.map, W, H, thr, wrapX), color: state.display.outlineColor, width: state.display.outlineWidth });
   // the reference heatmap has its own layer (under ours) and its own colours
   const rctx = refCanvas.getContext('2d');
   if (state.ref && state.showRef && state.refShow.heat && ref) {
@@ -386,20 +386,23 @@ function outlineOf(map, W, H, frac, wrap) {
   for (const v of map) if (v > mx) mx = v;
   return mx > 0 ? contourSegments(map, W, H, frac * mx, wrap) : new Float32Array(0);
 }
-/** Draw the current outlines onto a context of cw × ch pixels, lineWidth in that context's pixels. */
-function drawOutlines(g, cw, ch, lineWidth) {
+/**
+ * Draw the current outlines onto a context of cw × ch pixels. `perScreenPixel` is how many of that context's pixels
+ * one screen pixel covers; each outline has its own thickness in screen pixels.
+ */
+function drawOutlines(g, cw, ch, perScreenPixel) {
   const o = state.outlines;
   if (!o) return;
-  for (const l of o.lines) strokeSegments(g, l.segs, o.W, o.H, cw, ch, lineWidth, l.color);
+  for (const l of o.lines) strokeSegments(g, l.segs, o.W, o.H, cw, ch, l.width * perScreenPixel, l.color);
 }
-/** The on-screen outline layer: as big as the stage in device pixels, lines `outlineWidth` screen pixels wide. */
+/** The on-screen outline layer: as big as the stage in device pixels. */
 function drawOutlineLayer() {
   const rect = $('stage').getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
   const cw = Math.max(1, Math.round(rect.width * dpr)), ch = Math.max(1, Math.round(rect.height * dpr));
   if (outlineCanvas.width !== cw || outlineCanvas.height !== ch) { outlineCanvas.width = cw; outlineCanvas.height = ch; }
   const g = outlineCanvas.getContext('2d');
   g.clearRect(0, 0, cw, ch);
-  if (!state.view) drawOutlines(g, cw, ch, state.display.outlineWidth * dpr);   // the 360° view draws its own
+  if (!state.view) drawOutlines(g, cw, ch, dpr);   // the 360° view draws its own
 }
 
 // ---------- reference maps ----------
@@ -563,7 +566,9 @@ $('ref-heat').addEventListener('change', e => { state.refShow.heat = e.target.ch
 $('ref-outline').addEventListener('change', e => { state.refShow.outline = e.target.checked; if (e.target.checked) state.showRef = true; syncLayerChips(); requestRender(); });
 $('ref-outline-color').addEventListener('input', e => { state.refShow.outlineColor = e.target.value; requestRender(); });
 $('outline-color').addEventListener('input', e => { state.display.outlineColor = e.target.value; requestRender(); });
-$('outline-width').addEventListener('change', e => { state.display.outlineWidth = Math.min(20, Math.max(0.5, Number(e.target.value) || 2)); e.target.value = String(state.display.outlineWidth); requestRender(); });
+const widthInput = (id, set) => $(id).addEventListener('change', e => { const w = Math.min(20, Math.max(0.5, Number(e.target.value) || 2)); e.target.value = String(w); set(w); requestRender(); });
+widthInput('outline-width', w => { state.display.outlineWidth = w; });
+widthInput('ref-outline-width', w => { state.refShow.outlineWidth = w; });
 $('ref-colormap').innerHTML = COLORMAPS.map(c => `<option value="${c}">${c[0].toUpperCase() + c.slice(1)}</option>`).join('');
 $('ref-colormap').value = 'ice';
 $('ref-colormap').addEventListener('change', e => { state.refColormap = e.target.value; requestRender(); });
@@ -604,7 +609,7 @@ function draw360(result, W, H) {
   const sw = 2048, sh = 1024;   // fixed, even for small videos, so thin outlines stay sharp when zoomed in
   if (src.width !== sw || src.height !== sh) { src.width = sw; src.height = sh; }
   // outline thickness in screen pixels at the centre of the view: source pixels per radian over screen pixels per radian
-  drawComposite(src, state.display.outlineWidth * (window.devicePixelRatio || 1) * (sw / (2 * Math.PI)) / v.pixelsPerRadian());
+  drawComposite(src, (window.devicePixelRatio || 1) * (sw / (2 * Math.PI)) / v.pixelsPerRadian());
   if ($('view360-follow').checked && result && result.max > 0) {
     let a = 0;
     for (let i = 1; i < result.map.length; i++) if (result.map[i] > result.map[a]) a = i;
@@ -1537,16 +1542,16 @@ function compositeCanvas(maxWidth = 3840) {
   return c;
 }
 /**
- * Video with all overlays at c's size. `outlineWidth` is the outline thickness in c's pixels; by default the
+ * Video with all overlays at c's size. `perScreenPixel`: c's pixels per screen pixel for the outlines; by default the
  * outlines keep the thickness they have on screen relative to the picture.
  */
-function drawComposite(c, outlineWidth) {
+function drawComposite(c, perScreenPixel) {
   const g = c.getContext('2d');
   g.drawImage(converting() ? $('erp-canvas') : video, 0, 0, c.width, c.height);
   if (state.ref && state.showRef && state.refShow.heat) g.drawImage(refCanvas, 0, 0, c.width, c.height);
   { g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high'; g.drawImage(heatCanvas, 0, 0, c.width, c.height); }
   const stageWidth = $('stage').getBoundingClientRect().width || c.width;
-  drawOutlines(g, c.width, c.height, outlineWidth ?? state.display.outlineWidth * c.width / stageWidth);
+  drawOutlines(g, c.width, c.height, perScreenPixel ?? c.width / stageWidth);
   g.drawImage(marksCanvas, 0, 0, c.width, c.height);
 }
 $('export-snapshot').addEventListener('click', () => {

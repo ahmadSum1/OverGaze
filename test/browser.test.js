@@ -173,6 +173,14 @@ test('gaze files add up, observers can be removed, messages can be dismissed, a 
     assert.ok(t6 > 2.5 * t2 && t6 < 3.5 * t2, `6 px outline vs 2 px: ${t6} vs ${t2} pixels of ink`);
     assert.ok(Math.abs(t2small - t2) < 0.2 * t2 && Math.abs(t2big - t2) < 0.2 * t2, `same thickness at map widths 256 / 512 / 1024: ${t2small} / ${t2} / ${t2big}`);
     await thick(2, 512);
+    // each outline has its own thickness: the reference outline alone at 2 and 6, ours untouched
+    const refInk = async w => { await b.eval(`(e => { e.value = '${w}'; e.dispatchEvent(new Event('change')); overgaze.render(); return 1; })(document.querySelector('#ref-outline-width'))`); return b.eval(inkOf); };
+    await b.eval(`document.querySelector('#ref-outline').click(); document.querySelector('#show-outline').click(); overgaze.render(); 1`);
+    const r2 = await refInk(2), r6 = await refInk(6);
+    assert.ok(r6 > 2.5 * r2 && r6 < 3.5 * r2, `reference outline 6 px vs 2 px: ${r6} vs ${r2} pixels of ink`);
+    assert.equal(await b.eval('overgaze.state.display.outlineWidth'), 2, 'our thickness unchanged');
+    await refInk(2);
+    await b.eval(`document.querySelector('#ref-outline').click(); document.querySelector('#show-outline').click(); overgaze.render(); 1`);
 
     // the Gaze and Reference buttons hide everything of their side, outlines included, and leave the switches alone
     const alphaOf = id => b.eval(`(() => { const c = document.querySelector('#${id}'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i]) n++; return n; })()`);
