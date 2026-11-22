@@ -100,7 +100,7 @@ function lkLevel(I0, I1, W, H, u, v, { iterations, radius, wrap }) {
  * Returns { u, v } in pixels of the input resolution.
  */
 export function opticalFlow(I0, I1, W, H, opts = {}) {
-  const o = { levels: 4, iterations: 4, radius: 3, wrap: true, smooth: 3, ...opts };
+  const o = { levels: 4, iterations: 4, radius: 3, wrap: true, smooth: 3, select: true, selectRadius: 2, selectReach: 3, ...opts };
   const p0 = [[blur3(I0, W, H, o.wrap), W, H]], p1 = [[blur3(I1, W, H, o.wrap), W, H]];
   for (let l = 1; l < o.levels; l++) {
     const [a, w, h] = p0[l - 1], [b] = p1[l - 1];
@@ -121,9 +121,47 @@ export function opticalFlow(I0, I1, W, H, opts = {}) {
       u = nu; v = nv; cw = w; ch = h;
     }
     lkLevel(a, b, w, h, u, v, { iterations: o.iterations, radius: o.radius, wrap: o.wrap });
+    if (o.select) selectCandidates(a, b, w, h, u, v, o);
   }
-  if (o.smooth > 0) return confidenceSmooth(p0[0][0], W, H, u, v, o);
+  if (o.smooth > 0) confidenceSmooth(p0[0][0], W, H, u, v, o);
+  if (o.select) selectCandidates(p0[0][0], p1[0][0], W, H, u, v, o);
   return { u, v };
+}
+
+/**
+ * Each pixel keeps whichever movement explains its neighbourhood best: no movement at all, its own, or that of a
+ * pixel a few steps away. The cost is the mean absolute difference between the first frame and the second frame
+ * moved back by the candidate, over a (2·radius+1)² window. This stops motion spreading from a moving neighbour or
+ * from the coarse levels of the pyramid into parts of the picture that do not change (sand next to surf), while a
+ * flat area that really moves with the camera keeps the movement of its textured neighbours. On a tie, "no
+ * movement" wins. Checked against OpenCV's DIS flow on Salient360 clips (see the pull request that added this).
+ */
+function selectCandidates(I0, I1, W, H, u, v, o) {
+  const n = W * H, r = o.selectRadius, d = o.selectReach;
+  const offsets = [[0, 0, true], [0, 0, false], [d, 0], [-d, 0], [0, d], [0, -d], [d, d], [-d, -d], [d, -d], [-d, d]];
+  const bestCost = new Float32Array(n).fill(Infinity), bu = new Float32Array(n), bv = new Float32Array(n);
+  const res = new Float32Array(n), cu = new Float32Array(n), cv = new Float32Array(n);
+  for (const [dx, dy, zero] of offsets) {
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      if (zero) { cu[i] = 0; cv[i] = 0; } else {
+        const xx = o.wrap ? (x + dx + W) % W : Math.min(W - 1, Math.max(0, x + dx)), yy = Math.min(H - 1, Math.max(0, y + dy));
+        cu[i] = u[yy * W + xx]; cv[i] = v[yy * W + xx];
+      }
+    }
+    // the candidate of pixel i is tried over i's whole window: residual of every window pixel moved by i's candidate
+    // is approximated by moving each pixel by its own candidate field, which equals it where the field is smooth
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      res[i] = Math.abs(sampleBilinear(I1, W, H, x + cu[i], y + cv[i], o.wrap) - I0[i]);
+    }
+    const sum = boxSum(res, W, H, r, o.wrap), area = (2 * r + 1) ** 2;
+    for (let i = 0; i < n; i++) {
+      const c = sum[i] / area;
+      if (c < bestCost[i]) { bestCost[i] = c; bu[i] = cu[i]; bv[i] = cv[i]; }
+    }
+  }
+  u.set(bu); v.set(bv);
 }
 
 /**
@@ -148,7 +186,6 @@ function confidenceSmooth(I0, W, H, u, v, o) {
   }
   const sc = boxSum(c, W, H, o.smooth, o.wrap), su = boxSum(cu, W, H, o.smooth, o.wrap), sv = boxSum(cv, W, H, o.smooth, o.wrap);
   for (let i = 0; i < n; i++) { u[i] = su[i] / sc[i]; v[i] = sv[i] / sc[i]; }
-  return { u, v };
 }
 
 /**

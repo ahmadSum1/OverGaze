@@ -214,6 +214,8 @@
           <label>Range<select id="flow-range"><option value="all">whole video</option><option value="export">export range</option></select></label>
         </div>
         <div class="button-row"><button id="analyse" class="button button-outline" type="button" disabled>Analyse motion</button><button id="clear-flow" class="button button-outline" type="button" disabled>Clear</button></div>
+        <div class="button-row"><button id="motion-file" class="button button-outline" type="button" title="A .npz motion file, for example made with OpenCV by tools/motion_opencv.py">Load motion file (.npz)</button></div>
+        <input id="motion-file-input" type="file" accept=".npz" hidden>
         <div id="flow-progress" class="progress" hidden><div></div></div>
         <p id="flow-status" class="hint">Not analysed.</p>
         <label class="view-switch"><span>Use motion compensation</span><input id="motion" type="checkbox" role="switch" disabled><span class="switch-track" aria-hidden="true"></span></label>
