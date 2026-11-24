@@ -991,7 +991,7 @@ const AGREE_W = 128, AGREE_H = 64, AGREE_MAX_FRAMES = 400;
 /** What the scores depend on: the gaze after filters and the settings that shape the maps. */
 function agreementKey() {
   const s = state.settings;
-  return JSON.stringify([s.projection, s.sigmaDeg, s.truncate, s.planarFovDeg, s.windowSec, s.kernel, s.causal, s.durationWeight, s.motionComp && state.flow ? state.flowStamp : 0, s.lonOffsetDeg, s.flipX, s.flipY, state.fps, video.duration || 0]);
+  return JSON.stringify([s.projection, s.sigmaDeg, s.truncate, s.planarFovDeg, s.windowSec, s.kernel, s.peakTauSec, s.causal, s.durationWeight, s.motionComp && state.flow ? state.flowStamp : 0, s.lonOffsetDeg, s.flipX, s.flipY, state.fps, video.duration || 0]);
 }
 let agreementTimer = 0;
 function scheduleAgreement() {
@@ -1150,7 +1150,8 @@ bindPair('window', 'window-num', v => { state.settings.windowSec = Math.max(0, v
 bindPair('lon-offset', 'lon-offset-num', v => { state.settings.lonOffsetDeg = v; onSettings(); });
 $('projection').addEventListener('change', e => { state.projectionTouched = true; state.settings.projection = e.target.value; $('fov-row').hidden = e.target.value !== 'planar'; updateSubtitle(); updateButtons(); onSettings(); });
 $('fov').addEventListener('change', e => { state.settings.planarFovDeg = Math.max(1, Number(e.target.value) || 90); onSettings(); });
-$('kernel').addEventListener('change', e => { state.settings.kernel = e.target.value; onSettings(); });
+$('kernel').addEventListener('change', e => { state.settings.kernel = e.target.value; $('tau-row').hidden = e.target.value !== 'peaked'; onSettings(); });
+$('peak-tau').addEventListener('change', e => { const v = Math.min(5, Math.max(0.01, Number(e.target.value) || 0.25)); e.target.value = String(v); state.settings.peakTauSec = v; onSettings(); });
 $('causal').addEventListener('change', e => { state.settings.causal = e.target.checked; onSettings(); });
 $('duration-weight').addEventListener('change', e => { state.settings.durationWeight = e.target.checked; onSettings(); });
 $('fps').addEventListener('change', e => { const f = Number(e.target.value); if (f > 0) { setFps(f, 'manual'); if (/^frame/.test(state.mapping?.timeUnit) || /^frame/.test(state.mapping?.durationUnit)) rebuildGaze(); } });
@@ -1177,7 +1178,8 @@ function applySettings(o) {
   const S = state.settings;
   const pair = (key, rid, nid, min = 0) => { if (key in o) { S[key === 'sigmaDeg' ? 'sigmaDeg' : key] = Math.max(min, Number(o[key])); $(rid).value = $(nid).value = String(S[key]); } };
   pair('sigmaDeg', 'sigma', 'sigma-num', 0.05); pair('windowSec', 'window', 'window-num'); pair('lonOffsetDeg', 'lon-offset', 'lon-offset-num', -360);
-  if ('kernel' in o) { S.kernel = o.kernel; $('kernel').value = o.kernel; }
+  if ('kernel' in o) { S.kernel = o.kernel; $('kernel').value = o.kernel; $('tau-row').hidden = o.kernel !== 'peaked'; }
+  if ('peakTauSec' in o && o.peakTauSec > 0) { S.peakTauSec = o.peakTauSec; $('peak-tau').value = String(o.peakTauSec); }
   for (const [key, id] of [['causal', 'causal'], ['durationWeight', 'duration-weight'], ['flipX', 'flip-x'], ['flipY', 'flip-y']]) if (key in o) { S[key] = !!o[key]; $(id).checked = !!o[key]; }
   if ('motionComp' in o) { S.motionComp = !!o.motionComp && !!state.flow; $('motion').checked = S.motionComp; state.wantMotion = !!o.motionComp; }
   if ('velocity' in o) { S.velocity = Math.max(0, Number(o.velocity) || 0); $('vel').value = String(S.velocity); }
@@ -1239,7 +1241,7 @@ function presetByValue(v) {
 /** The preset or template the settings came from (also while they have been changed since). */
 function chosenPreset() { return presetByValue(state.presetBase); }
 const SETTING_LABELS = { projection: 'projection', sigmaDeg: 'σ', truncate: 'kernel cut-off', planarFovDeg: 'field of view', windowSec: 'pooling window',
-  kernel: 'pooling weight', causal: 'past only', durationWeight: 'weight by duration', motionComp: 'motion compensation', lonOffsetDeg: 'rotation',
+  kernel: 'pooling weight', peakTauSec: 'τ', causal: 'past only', durationWeight: 'weight by duration', motionComp: 'motion compensation', lonOffsetDeg: 'rotation',
   flipX: 'left–right flip', flipY: 'up–down flip', velocity: 'speed filter', minDurationMs: 'minimum duration', coverageThreshold: 'coverage threshold' };
 /**
  * Once any setting differs from the chosen preset, the menu shows "(custom <preset name>)" as a separate entry,
@@ -1387,7 +1389,7 @@ function settingsJson(extra = {}) {
     } : null,
     saliency: {
       projection: s.projection, sigma_deg: s.sigmaDeg, kernel_cutoff_sigma: s.truncate, planar_fov_deg: s.projection === 'planar' ? s.planarFovDeg : undefined,
-      pooling_window_s: s.windowSec, pooling_weight: s.kernel, causal: s.causal, weight_by_duration: s.durationWeight,
+      pooling_window_s: s.windowSec, pooling_weight: s.kernel, peaked_tau_s: s.kernel === 'peaked' ? (s.peakTauSec ?? 0.25) : undefined, causal: s.causal, weight_by_duration: s.durationWeight,
       motion_compensation: !!(s.motionComp && state.flow), lon_offset_deg: s.lonOffsetDeg, flip_left_right: s.flipX, flip_up_down: s.flipY,
       velocity_filter_deg_per_s: s.velocity || 0, coverage_threshold: s.coverageThreshold,
       frame_rule: 'frame k covers [k/fps, (k+1)/fps); a gaze sample or fixation counts if its time distance to that interval is <= pooling_window_s (0 = active during the frame).',
@@ -1728,7 +1730,8 @@ $('empty-sample').addEventListener('click', () => loadSample('erp'));
   const settingsFromQuery = () => {
     const o = {}, num = (k, to) => { if (q.get(k) != null && Number.isFinite(Number(q.get(k)))) o[to] = Number(q.get(k)); };
     num('sigma', 'sigmaDeg'); num('window', 'windowSec'); num('velocity', 'velocity'); num('rotate', 'lonOffsetDeg');
-    if (['box', 'triangle', 'gaussian'].includes(q.get('kernel'))) o.kernel = q.get('kernel');
+    if (['box', 'triangle', 'gaussian', 'peaked'].includes(q.get('kernel'))) o.kernel = q.get('kernel');
+    num('tau', 'peakTauSec');
     if (q.has('past')) o.causal = true;
     if (Object.keys(o).length) applySettings(o);
   };
