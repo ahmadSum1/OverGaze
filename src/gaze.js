@@ -297,7 +297,7 @@ export function buildGaze(files, mapping, context = {}) {
   const fps = context.fps || 30;
   const secs = (value, unit) => toSeconds(value, unit, fps);
   const observers = [], conditions = [];
-  const observerIndex = new Map(), conditionIndex = new Map();
+  const observerIndex = new Map(), conditionIndex = new Map(), observerFile = [];
   const index = (list, map, key) => {
     if (!map.has(key)) { map.set(key, list.length); list.push(key); }
     return map.get(key);
@@ -306,7 +306,7 @@ export function buildGaze(files, mapping, context = {}) {
   let skipped = 0;
   const rules = (context.rules || []).filter(r => r.clauses?.length && r.clauses.every(c => c.column && RULE_OPS.includes(c.op) && String(c.value ?? '').trim() !== ''));
   const ruleRemoved = new Array(rules.length).fill(0);
-  for (const file of files) {
+  for (const [fileIndex, file] of files.entries()) {
     const cols = file.table.columns;
     const col = name => (name ? cols.indexOf(name) : -1);
     const it = col(mapping.time), ix = col(mapping.x), iy = col(mapping.y), iz = col(mapping.z);
@@ -349,6 +349,7 @@ export function buildGaze(files, mapping, context = {}) {
             : mapping.conditionFrom === 'file' ? stem : 'all';
       // Observers that share a name across conditions stay separate people.
       const observer = index(observers, observerIndex, mapping.conditionFrom === 'folder' || mapping.conditionFrom === 'folder2' ? `${conditionKey}/${observerKey}` : observerKey);
+      if (observerFile.length < observers.length) observerFile.push(fileIndex);   // the file each observer first appears in
       const condition = index(conditions, conditionIndex, conditionKey);
       const weight = iw >= 0 && Number.isFinite(Number(row[iw])) ? Number(row[iw]) : 1;
       records.push([t0, t1, lonlat[0], lonlat[1], observer, condition, weight]);
@@ -356,7 +357,7 @@ export function buildGaze(files, mapping, context = {}) {
   }
   if (!records.length) throw new Error(ruleRemoved.some(Boolean) ? 'The drop rules removed every gaze row.' : 'No valid gaze rows were found with this column mapping.');
   const g = packRecords(records, observers, conditions, skipped);
-  g.ruleRemoved = ruleRemoved; g.rules = rules;
+  g.ruleRemoved = ruleRemoved; g.rules = rules; g.observerFile = observerFile;
   return g;
 }
 
@@ -387,7 +388,7 @@ export function dropObservers(g, removed) {
   for (let i = 0; i < g.n; i++) if (!removed.has(g.obs[i])) records.push([g.t0[i], g.t1[i], g.lon[i], g.lat[i], g.obs[i], g.cond[i], g.w[i]]);
   if (!records.length) throw new Error('All observers were removed.');
   const out = packRecords(records, g.observers, g.conditions, g.skipped);
-  out.removed = g.n - records.length;
+  out.removed = g.n - records.length; out.observerFile = g.observerFile;
   return out;
 }
 

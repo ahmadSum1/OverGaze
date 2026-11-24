@@ -6,6 +6,7 @@ import { openMotionFile } from './motionfile.js';
 import { ZipWriter, encodeGrayPng, npyHeader } from './export.js';
 import { fpsFromDeltas } from './timing.js';
 import { fpsFromMp4File } from './mp4fps.js';
+import { pairEyes } from './pairs.js';
 import { compareMaps, openReference, referencesFor, resample } from './reference.js';
 import { PRESETS, pickSettings, presetDifferences, settingsFromJson } from './presets.js';
 import { LayoutConverter, VIEW_MODES, View360 } from './view360.js';
@@ -22,7 +23,7 @@ const GAZE_EXT = /\.(csv|tsv|txt|json|arff|dat)$/i, VIDEO_EXT = /\.(mp4|m4v|webm
 const state = {
   video: null, fps: 30, fpsSource: 'default', fpsDeltas: [], lastFrameMeta: null, mediaTime: 0,
   files: [], mapping: null, gazeAll: null, gaze: null, observerEnabled: null, conditionEnabled: null,
-  settings: { ...DEFAULTS, velocity: 0, minDurationMs: 0 },
+  settings: { ...DEFAULTS, velocity: 0, minDurationMs: 0, eyePairing: 'auto' }, people: null,
   rowRules: [], agreement: null, observerSort: 'name',
   display: { outline: false, outlineColor: '#c8f56a', outlineTouched: false, outlineWidth: 2, mode: 'heat', colormap: 'jet', opacity: 0.65, gamma: 1, mapWidth: 512, showPoints: true, showFlow: false },
   flow: null, flowInfo: null, analysing: null, exporting: null, recording: null,
@@ -899,6 +900,7 @@ function rebuildGaze() {
     const removed = new Set(built.observers.map((o, i) => state.removedObservers?.has(o) ? i : -1).filter(i => i >= 0));
     state.gazeAll = dropObservers(built, removed);
     state.gazeAll.skipped = built.skipped; state.gazeAll.ruleRemoved = built.ruleRemoved; state.gazeAll.rules = built.rules;
+    updatePairs();
     applyGazeFilters(false);
     state.observerEnabled = Uint8Array.from(state.gaze.observers, o => prevObs?.has(o) ? prevObs.get(o) : 1);
     state.conditionEnabled = Uint8Array.from(state.gaze.conditions, c => prevCond?.has(c) ? prevCond.get(c) : 1);
@@ -914,6 +916,25 @@ function rebuildGaze() {
  * The filters after reading, in a fixed order: rows without a valid time or position are skipped and the drop
  * rules applied while reading (buildGaze); then fixations shorter than the minimum duration; then the speed filter.
  */
+/**
+ * Pair each person's left and right eye (see pairs.js). Made on the gaze before the duration and speed filters, so
+ * the pairs do not change with them; observers removed with × are left out.
+ */
+function updatePairs() {
+  const g = state.gazeAll, m = state.mapping;
+  state.people = g && state.settings.eyePairing !== 'off' ? pairEyes(g, { preset: m?.preset, observerFrom: m?.observerFrom, fileCount: state.files.length }) : null;
+  const P = state.people, el = $('pair-status');
+  if (!el) return;
+  if (!g) { el.textContent = ''; return; }
+  if (state.settings.eyePairing === 'off') { el.textContent = 'Every recording is its own observer.'; return; }
+  if (!P) { el.textContent = 'No left and right eyes to pair: the names do not say which recording is which eye.'; return; }
+  const single = P.singleLeft + P.singleRight;
+  el.textContent = `${P.pairs} people with both eyes, ${single} recording${single === 1 ? '' : 's'} with no partner (${P.singleLeft} left, ${P.singleRight} right). `
+    + (P.method === 'names' ? 'Partners found from the shared names. ' : 'Partners found by matching: fixations that start at the same moments (within 60 ms) at the same spot (within 3°). ')
+    + (P.sidesFrom === 'file order' ? 'The file names do not say which eye is which: the first file is taken as the left eye.' : 'Left and right taken from the names (folders, conditions or observer names).');
+}
+$('eye-pairing').addEventListener('change', e => { applySettings({ eyePairing: e.target.value }); });
+
 function applyGazeFilters(refresh = true) {
   if (!state.gazeAll) return;
   const S = state.settings;
@@ -1183,6 +1204,7 @@ function applySettings(o) {
   for (const [key, id] of [['causal', 'causal'], ['durationWeight', 'duration-weight'], ['flipX', 'flip-x'], ['flipY', 'flip-y']]) if (key in o) { S[key] = !!o[key]; $(id).checked = !!o[key]; }
   if ('motionComp' in o) { S.motionComp = !!o.motionComp && !!state.flow; $('motion').checked = S.motionComp; state.wantMotion = !!o.motionComp; }
   if ('velocity' in o) { S.velocity = Math.max(0, Number(o.velocity) || 0); $('vel').value = String(S.velocity); }
+  if ('eyePairing' in o && ['auto', 'off'].includes(o.eyePairing) && o.eyePairing !== S.eyePairing) { S.eyePairing = o.eyePairing; $('eye-pairing').value = o.eyePairing; updatePairs(); renderGroups(); }
   if ('minDurationMs' in o) { S.minDurationMs = Math.max(0, Number(o.minDurationMs) || 0); $('min-dur').value = String(S.minDurationMs); }
   if (('velocity' in o || 'minDurationMs' in o) && state.gazeAll) applyGazeFilters();
   if (o.projection === 'erp' || o.projection === 'planar') { S.projection = o.projection; $('projection').value = o.projection; $('fov-row').hidden = o.projection !== 'planar'; state.projectionTouched = true; updateSubtitle(); updateButtons(); }
@@ -1412,6 +1434,11 @@ function gazeProcessingJson() {
     min_fixation_duration_ms: s.minDurationMs || 0, rows_removed_by_min_duration: g.durationRemoved || 0,
     speed_filter_deg_per_s: s.velocity || 0, rows_removed_by_speed_filter: g.filtered || 0,
     removed_observers: [...(state.removedObservers || [])],
+    eye_pairing: { setting: s.eyePairing, ...(state.people ? {
+      method: state.people.method === 'names' ? 'partners from shared names' : 'matching: share of one eye\'s fixations with a fixation of the other starting within 60 ms and within 3°, best one-to-one assignment, pairs below 0.1 dropped',
+      sides_from: state.people.sidesFrom, pairs: state.people.pairs, single_left: state.people.singleLeft, single_right: state.people.singleRight,
+      people: state.people.people.map(p => ({ left: p.left >= 0 ? all.observers[p.left] : null, right: p.right >= 0 ? all.observers[p.right] : null, match: p.score == null ? null : +p.score.toFixed(3) }))
+    } : { pairs: 0 }) },
     observer_agreement: A ? {
       method: 'per frame, the correlation between one observer\'s map and the summed map of all the other observers of the same condition (leave-one-out), each pixel weighted by its area on the sphere for 360° video; averaged over the frames where both have gaze. The current saliency settings shape the maps.',
       map_width: A.W, map_height: A.H, frames_sampled: A.frameCount, frame_step: A.step,
@@ -1709,6 +1736,7 @@ async function droppedFiles(dt) {
 
 async function loadSample(kind = 'erp') {
   $('help-menu').open = false;
+  if (kind === 'eyes') return loadSampleEyes();
   const flat = kind === '2d', video_ = flat ? 'sample_2d.mp4' : 'sample_erp.mp4', gaze = flat ? 'sample_2d_gaze.csv' : 'sample_gaze.csv';
   try {
     // Fetched into memory so seeking works whatever the web server supports.
@@ -1723,6 +1751,21 @@ async function loadSample(kind = 'erp') {
 }
 $('load-sample').addEventListener('click', () => loadSample('erp'));
 $('load-sample-2d').addEventListener('click', () => loadSample('2d'));
+$('load-sample-eyes').addEventListener('click', () => loadSample('eyes'));
+/** The 360° sample with a left- and a right-eye file in the Salient360 head + eye format (folders L and R). */
+async function loadSampleEyes() {
+  try {
+    const blob = await (await fetch('./sample/sample_erp.mp4')).blob();
+    loadVideoFile(new File([blob], 'sample_erp.mp4', { type: 'video/mp4' }));
+    const files = [];
+    for (const side of ['L', 'R']) {
+      const f = new File([await (await fetch(`./sample/eyes/${side}/sample_fixations.csv`)).text()], 'sample_fixations.csv');
+      f.relativePath = `eyes/${side}/sample_fixations.csv`; files.push(f);
+    }
+    await loadGazeFiles(files);
+    notice('Sample loaded with both eyes: the 8 simulated observers as a left- and a right-eye file (Salient360 format, folders L and R), plus one recording in each file with no partner.');
+  } catch (e) { notice(`Could not load the sample gaze (${e.message}).`, true); }
+}
 $('empty-sample').addEventListener('click', () => loadSample('erp'));
 
 (async function fromQuery() {
@@ -1735,7 +1778,7 @@ $('empty-sample').addEventListener('click', () => loadSample('erp'));
     if (q.has('past')) o.causal = true;
     if (Object.keys(o).length) applySettings(o);
   };
-  if (q.get('sample') != null) { await loadSample(q.get('sample') === '2d' ? '2d' : 'erp'); settingsFromQuery(); return; }
+  if (q.get('sample') != null) { await loadSample(['2d', 'eyes'].includes(q.get('sample')) ? q.get('sample') : 'erp'); settingsFromQuery(); return; }
   if (q.get('video')) loadVideoUrl(q.get('video'));
   if (q.get('gaze')) {
     try {
