@@ -171,7 +171,7 @@ The readout under the video shows the points in the window, the observers that c
 
 ### Motion compensation
 
-**Analyse motion** decodes the video at low resolution (128 × 64 to 512 × 256), computes dense optical flow between frames about 1/10 s apart (pyramidal Lucas–Kanade on grey frames, with wrap-around at the left/right edge for 360° video, smoothed with each pixel weighted by how well its motion is determined) and keeps the velocity fields in memory. With **Use motion compensation** on, every pooled gaze point is moved along the flow from its own time to the frame time, so a panning camera or a moving object keeps its saliency on the object instead of smearing along the path. **Show flow vectors** draws the field (arrow = motion over 0.5 s).
+**Analyse motion** decodes the video at low resolution (128 × 64 to 512 × 256), computes dense optical flow between frames about 1/10 s apart (pyramidal Lucas–Kanade on grey frames, with wrap-around at the left/right edge for 360° video, smoothed with each pixel weighted by how well its motion is determined; then each pixel keeps whichever movement matches the next frame best: its own, a neighbour's, or none, with a small charge for moving so that still parts of the picture stay still) and keeps the velocity fields in memory. With **Use motion compensation** on, every pooled gaze point is moved along the flow from its own time to the frame time, so a panning camera or a moving object keeps its saliency on the object instead of smearing along the path. **Show flow vectors** draws the field (arrow = motion over 0.5 s).
 
 | without | with motion compensation |
 |---|---|
@@ -180,6 +180,17 @@ The readout under the video shows the points in the window, the observers that c
 - *play (fast)* plays the video at normal speed in the background and takes frames as they appear (about as long as the video); *seek (exact)* seeks to each sample time, slower for large videos but independent of decoding speed. Both collapse the sample's smeared map; play mode on a busy machine can lose a flow field, which the store bridges.
 - Flow is reliable for camera motion and for large, contrasted objects. Small, fast objects can be missed at low resolution and low sample rates; raise both. Flow is measured in the ERP image, so it is distorted near the poles, like the image itself.
 - *Range* can limit the analysis to the export range, useful for a 30 s clip inside a long download.
+
+**Load motion file (.npz)** uses motion computed outside the browser instead, for example OpenCV's dense optical flow (DIS, dense inverse search), which is more accurate on real video:
+
+```
+python tools/motion_opencv.py clip.mp4                # → clip.motion.npz: 256 × 128, 10 fields per second, edges joined for 360°
+python tools/motion_opencv.py clip.mp4 --flat         # ordinary 2D video
+```
+
+It samples frames the same way as **Analyse motion** (seek). The file holds `t_a`, `t_b` (seconds), `flow` (fields × height × width × 2: pixels moved from the frame at `t_a` to the frame at `t_b`), and optionally `wrap`, `fps` and `method`; any tool that writes these arrays with NumPy (`np.savez` or `np.savez_compressed`) works. The status line and settings.json name the file and its method.
+
+![Motion file made with OpenCV, flow vectors shown](docs/screenshots/19-motion-file.png)
 
 ![Flow vectors](docs/screenshots/04-flow-vectors.png)
 
@@ -220,4 +231,4 @@ python3 tools/make_sample_2d.py  # regenerate the 2D sample (ffmpeg)
 
 The unit tests cover parsing and mapping (including the VR-EyeTracking and YT360 formats), the sphere Gaussian, pooling (Gaussian weights, fixations over frames), the speed filter, optical flow, motion-compensated pooling, frame-rate estimation and the ZIP / NPY / PNG writers. The browser tests start a small static server and a headless Chrome (`tools/cdp.mjs`, no dependencies, Node 22+ for the built-in WebSocket) and check: the sample loads with a clean console and draws the heatmap, `file://` shows the warning, motion compensation shrinks the pooled map, the export ZIP is complete, and a VR-EyeTracking-style folder is filtered and read correctly. Set `CHROME=/path/to/chrome` to choose the browser.
 
-`src/` holds `gaze.js` (parsing and coordinates), `saliency.js` (pooling and Gaussians), `flow.js` (optical flow and the flow store), `timing.js` and `mp4fps.js` (frame rate), `reference.js` (reference maps), `projections.js` (video layouts), `view360.js` (WebGL unfolding and 360° views), `export.js` (writers), `colormap.js`, the two workers and `app.js` (interface). `window.overgaze` exposes the state, `applySettings(...)` and `mapAt(frame, width)` (the raw map the export would write) for tests and the console.
+`src/` holds `gaze.js` (parsing and coordinates), `saliency.js` (pooling and Gaussians), `flow.js` (optical flow and the flow store), `motionfile.js` (motion files), `timing.js` and `mp4fps.js` (frame rate), `reference.js` (reference maps), `projections.js` (video layouts), `view360.js` (WebGL unfolding and 360° views), `export.js` (writers), `colormap.js`, the two workers and `app.js` (interface). `window.overgaze` exposes the state, `applySettings(...)` and `mapAt(frame, width)` (the raw map the export would write) for tests and the console.

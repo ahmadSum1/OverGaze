@@ -2,6 +2,7 @@ import { FILE_TIME, RULE_OPS, buildGaze, columnValues, dropObservers, defaultRan
 import { agreementScorer } from './agreement.js';
 import { DEFAULTS, coverage, frameCentre, frameOf, mapSize, renderMap } from './saliency.js';
 import { FlowStore, toGray } from './flow.js';
+import { openMotionFile } from './motionfile.js';
 import { ZipWriter, encodeGrayPng, npyHeader } from './export.js';
 import { fpsFromDeltas } from './timing.js';
 import { fpsFromMp4File } from './mp4fps.js';
@@ -990,7 +991,7 @@ const AGREE_W = 128, AGREE_H = 64, AGREE_MAX_FRAMES = 400;
 /** What the scores depend on: the gaze after filters and the settings that shape the maps. */
 function agreementKey() {
   const s = state.settings;
-  return JSON.stringify([s.projection, s.sigmaDeg, s.truncate, s.planarFovDeg, s.windowSec, s.kernel, s.causal, s.durationWeight, !!(s.motionComp && state.flow), s.lonOffsetDeg, s.flipX, s.flipY, state.fps, video.duration || 0]);
+  return JSON.stringify([s.projection, s.sigmaDeg, s.truncate, s.planarFovDeg, s.windowSec, s.kernel, s.causal, s.durationWeight, s.motionComp && state.flow ? state.flowStamp : 0, s.lonOffsetDeg, s.flipX, s.flipY, state.fps, video.duration || 0]);
 }
 let agreementTimer = 0;
 function scheduleAgreement() {
@@ -1044,8 +1045,10 @@ function updateFlowUi() {
   $('motion').disabled = !f; $('show-flow').disabled = !f; $('clear-flow').disabled = !f;
   if (f && state.wantMotion && !state.settings.motionComp) { state.settings.motionComp = true; $('motion').checked = true; }
   if (!f) { $('motion').checked = false; state.settings.motionComp = false; $('show-flow').checked = false; state.display.showFlow = false; }
+  if (f !== state.flowSeen) { state.flowSeen = f; state.flowStamp = (state.flowStamp || 0) + 1; }
+  const from = state.flowInfo?.method === 'file' ? `From ${state.flowInfo.file}${state.flowInfo.about ? ' (' + state.flowInfo.about + ')' : ''}: ` : '';
   $('flow-status').textContent = f
-    ? `${f.size} flow fields at ${f.W} × ${f.H}, ${fmt(f.times[0] - f.step / 2, 2)}–${fmt(f.times[f.size - 1] + f.step / 2, 2)} s, one every ${fmt(f.step, 3)} s, ${bytesText(f.bytes)}.`
+    ? `${from}${f.size} flow fields at ${f.W} × ${f.H}, ${fmt(f.times[0] - f.step / 2, 2)}–${fmt(f.times[f.size - 1] + f.step / 2, 2)} s, one every ${fmt(f.step, 3)} s, ${bytesText(f.bytes)}.`
     : state.video?.tainted ? 'Needs pixel access: load the video from disk or a CORS-enabled link.' : 'Not analysed.';
   updateButtons();
 }
@@ -1307,6 +1310,24 @@ $('prev-frame').addEventListener('click', () => stepFrames(-1));
 $('next-frame').addEventListener('click', () => stepFrames(1));
 $('scrubber').addEventListener('input', e => { video.currentTime = Number(e.target.value); });
 $('analyse').addEventListener('click', analyseMotion);
+$('motion-file').addEventListener('click', () => $('motion-file-input').click());
+$('motion-file-input').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file || state.analysing) return;
+  setStatus(`Reading ${file.name}…`);
+  try {
+    const m = await openMotionFile(file);
+    state.flow = m.store;
+    state.flowInfo = { method: 'file', file: file.name, about: m.method, fields: m.fields, file_fps: m.fps };
+    if (state.video && m.fps && Math.abs(m.fps - state.fps) / state.fps > 0.001) notice(`${file.name} was made at ${fmt(m.fps, 3)} frames per second; this video is at ${fmt(state.fps, 3)}. Its times are in seconds, so it still lines up if it was made from this video.`, true);
+    $('motion').checked = true; state.settings.motionComp = true;
+    setStatus(`Motion loaded from ${file.name}`);
+  } catch (err) {
+    showError(`Motion file: ${err.message}`); setStatus('Motion file not loaded');
+  }
+  updateFlowUi(); requestRender();
+});
 $('clear-flow').addEventListener('click', () => { state.flow = null; state.flowInfo = null; updateFlowUi(); requestRender(); });
 
 document.addEventListener('keydown', e => {
@@ -1373,7 +1394,9 @@ function settingsJson(extra = {}) {
       gaussian: s.projection === 'erp' ? 'exp(-theta^2 / (2 sigma^2)), theta = great-circle angle to the gaze point, summed over points' : '2D Gaussian in the image plane, sigma_px = sigma_deg * width / planar_fov_deg'
     },
     gaze_processing: g ? gazeProcessingJson() : { min_fixation_duration_ms: s.minDurationMs || 0, speed_filter_deg_per_s: s.velocity || 0, drop_row_rules: state.rowRules.map(r => ({ all_of: r.clauses })) },
-    motion: s.motionComp && state.flow ? { flow_width: state.flow.W, flow_height: state.flow.H, fields: state.flow.size, step_s: state.flow.step, ...state.flowInfo, method_note: 'pyramidal Lucas-Kanade on greyscale frames, wrap-around at the left/right edge for 360° video; each pooled point is moved along the flow from its own time to the frame time' } : null,
+    motion: s.motionComp && state.flow ? { flow_width: state.flow.W, flow_height: state.flow.H, fields: state.flow.size, step_s: state.flow.step, ...state.flowInfo,
+      method_note: (state.flowInfo?.method === 'file' ? `loaded from ${state.flowInfo.file}: ${state.flowInfo.about || 'no method given'}` : 'pyramidal Lucas-Kanade on greyscale frames (each pixel then keeps its own movement, none, or a neighbour\'s, whichever matches the next frame best), wrap-around at the left/right edge for 360° video')
+        + '; each pooled point is moved along the flow from its own time to the frame time' } : null,
     ...extra
   };
 }

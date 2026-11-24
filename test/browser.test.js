@@ -454,3 +454,27 @@ test('the frame rate is known right after the video loads, before it plays: from
     assert.deepEqual(b.logs, []);
   } finally { b.close(); server.close(); }
 });
+
+test('a motion file made outside the browser (.npz) replaces the estimate: status, motion compensation and settings.json say where it came from', opts, async () => {
+  const { server, url } = await serve(), b = await launch();
+  try {
+    await b.goto(url + '?sample');
+    await b.waitFor('!!overgaze.state.gaze && document.querySelector("#video").readyState >= 2', 20000, 'sample ready');
+    await b.eval('overgaze.applySettings({ windowSec: 1, kernel: "gaussian" }); 1');
+    await b.setFiles('#motion-file-input', [join(ROOT, 'test', 'fixtures', 'tiny.motion.npz')]);
+    await b.waitFor('overgaze.state.flowInfo?.method === "file"', 10000, 'motion file loaded');
+    assert.match(await b.eval('document.querySelector("#flow-status").textContent'), /^From tiny\.motion\.npz \(OpenCV DIS test\): 3 flow fields at 8 × 4/);
+    assert.equal(await b.eval('document.querySelector("#motion").checked'), true, 'motion compensation is switched on');
+    const note = await b.eval('overgaze.settingsJson().motion.method_note');
+    assert.match(note, /loaded from tiny\.motion\.npz: OpenCV DIS test/);
+    // the fixture covers 0.05–0.35 s only; at 0.2 s the pooled points move
+    const moved = await b.eval('Array.from(overgaze.mapAt(6, 128).map).join(",")');
+    await b.eval('overgaze.applySettings({ motionComp: false }); 1');
+    const still = await b.eval('Array.from(overgaze.mapAt(6, 128).map).join(",")');
+    assert.notEqual(moved, still, 'the loaded motion moves the pooled gaze');
+    // a file that is not a motion file is refused with a message
+    await b.setFiles('#motion-file-input', [join(ROOT, 'sample', 'sample_gaze.csv')]);
+    await b.waitFor('/Motion file: .*not an \\.npz/.test(document.querySelector("#error-text").textContent)', 5000, 'error shown');
+    assert.equal(await b.eval('overgaze.state.flowInfo.file'), 'tiny.motion.npz', 'the loaded motion stays');
+  } finally { b.close(); server.close(); }
+});

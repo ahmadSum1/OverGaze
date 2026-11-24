@@ -427,3 +427,57 @@ test('the frame rate comes from the video track of the MP4 header (time scale an
   assert.equal(await fpsFromMp4File(new Blob([new TextEncoder().encode('\x1aE\xdf\xa3 webm header')])), null, 'not MP4: measured instead');
   assert.equal(fpsFromMoov(box('moov', track('vide', 30000, [])).buffer), null, 'fragmented file without a frame table');
 });
+
+// ---------- optical flow: no false movement on still parts ----------
+test('a textured square moving over a still, faint background (like surf next to sand): the background reports no movement', () => {
+  const W = 128, H = 64, a = new Float32Array(W * H), b = new Float32Array(W * H);
+  let seed = 1; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const tex = Float32Array.from({ length: W * H }, rnd), sq = Float32Array.from({ length: 24 * 24 }, rnd);
+  // smooth the noise a little so it has gradients the estimator can use
+  const smooth = (img, w, h) => img.map((_, i) => { const x = i % w, y = (i / w) | 0; let s = 0, n = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < w && yy < h) { s += img[yy * w + xx]; n++; } } return s / n; });
+  const bg = smooth(tex, W, H).map(x => 0.5 + 0.03 * (x - 0.5)), fg = smooth(sq, 24, 24);   // background contrast 3 % of the square's
+  const paint = (img, x0) => { img.set(bg); for (let y = 0; y < 24; y++) for (let x = 0; x < 24; x++) img[(20 + y) * W + x0 + x] = fg[y * 24 + x]; };
+  paint(a, 40); paint(b, 44);   // the square moves 4 px to the right
+  const { u, v } = opticalFlow(a, b, W, H, { wrap: true });
+  const mag = [], inside = [];
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x, far = x < 30 || x > 78 || y < 10 || y > 54;
+    if (far) mag.push(Math.hypot(u[i], v[i]));
+    if (x >= 48 && x < 64 && y >= 26 && y < 38) inside.push(u[i]);
+  }
+  mag.sort((p, q) => p - q); inside.sort((p, q) => p - q);
+  assert.ok(mag[mag.length >> 1] < 0.05, `median movement on the still background ${mag[mag.length >> 1]}`);
+  assert.ok(mag[Math.floor(mag.length * 0.95)] < 0.5, `95th percentile on the still background ${mag[Math.floor(mag.length * 0.95)]}`);
+  close(inside[inside.length >> 1], 4, 0.3, 'the square moves 4 px');
+});
+
+// ---------- motion files made with OpenCV (tools/motion_opencv.py) ----------
+import { readNpz, motionFromArrays } from '../src/motionfile.js';
+import { readFileSync } from 'node:fs';
+
+test('a motion file (.npz from NumPy, compressed) loads into the flow store: times, movement, wrap and method', async () => {
+  const file = new Blob([readFileSync(new URL('./fixtures/tiny.motion.npz', import.meta.url))]);
+  const arrays = await readNpz(file);
+  assert.deepEqual(Object.keys(arrays).sort(), ['flow', 'fps', 'method', 't_a', 't_b', 'wrap']);
+  const m = motionFromArrays(arrays, 'tiny.motion.npz');
+  assert.equal(m.fields, 3); assert.equal(m.method, 'OpenCV DIS test'); close(m.fps, 29.97002997, 1e-9);
+  const s = m.store;
+  assert.equal(s.W, 8); assert.equal(s.H, 4); assert.equal(s.wrap, true);
+  assert.deepEqual(s.times.map(t => +t.toFixed(3)), [0.1, 0.2, 0.3]);
+  // 2 px right and 0.5 px up per 0.1 s = 20 px/s and −5 px/s
+  const [vx, vy] = s.velocity(0.1, 3, 2); close(vx, 20, 0.05); close(vy, -5, 0.05);
+  const [px, py] = s.velocity(0.2, 0, 0); close(px, 12.5, 0.05); close(py, 30, 0.05);
+});
+
+test('a stored (uncompressed) .npz from the export writer also loads; a wrong file says what is expected', async () => {
+  const parts = [], zip = new ZipWriter(async b => parts.push(b));
+  const arr = (dtype, shape, typed) => { const h = npyHeader(dtype, shape), out = new Uint8Array(h.length + typed.byteLength); out.set(h); out.set(new Uint8Array(typed.buffer), h.length); return out; };
+  await zip.add('t_a.npy', arr('<f8', [1], Float64Array.of(1)));
+  await zip.add('t_b.npy', arr('<f8', [1], Float64Array.of(1.5)));
+  await zip.add('flow.npy', arr('<f4', [1, 2, 4, 2], new Float32Array(16).fill(1)));
+  await zip.finish();
+  const m = motionFromArrays(await readNpz(new Blob(parts)), 'x.npz');
+  assert.equal(m.store.wrap, true, 'wrap defaults to 360°'); close(m.store.velocity(1.25, 1, 1)[0], 2, 0.05);
+  assert.throws(() => motionFromArrays({}, 'y.npz'), /expected the arrays t_a, t_b and flow/);
+  await assert.rejects(readNpz(new Blob([new Uint8Array(100)])), /not an \.npz/);
+});
