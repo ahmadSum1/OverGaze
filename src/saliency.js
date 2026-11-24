@@ -25,7 +25,8 @@ export const DEFAULTS = Object.freeze({
   truncate: 3,              // kernel cut-off in σ
   planarFovDeg: 90,         // planar only: horizontal field of view used to turn degrees into pixels
   windowSec: 0,             // temporal pooling half-width: frames within ±windowSec are pooled
-  kernel: 'box',            // 'box' | 'triangle' | 'gaussian' (σ_t = windowSec / 2)
+  kernel: 'box',            // 'box' | 'triangle' | 'gaussian' (σ_t = windowSec / 2) | 'peaked' (exp(−|Δt| / peakTauSec))
+  peakTauSec: 0.25,         // 'peaked' only: how fast the weight falls away from the current frame
   causal: false,            // only use gaze from the past (as a deployed, real-time mask would)
   durationWeight: false,    // weight each fixation by its duration
   motionComp: false,        // warp pooled gaze along optical flow into the current frame
@@ -40,6 +41,7 @@ export const frameOf = (t, fps) => Math.max(0, Math.floor(t * fps + 1e-6));
 
 function temporalWeight(d, reach, s) {
   if (s.kernel === 'triangle') return Math.max(0, 1 - d / reach);
+  if (s.kernel === 'peaked') return Math.exp(-d / Math.max(1e-3, s.peakTauSec ?? 0.25));
   if (s.kernel === 'gaussian') {
     const st = s.windowSec / 2;
     return st > 0 ? Math.exp(-(d * d) / (2 * st * st)) : 1;

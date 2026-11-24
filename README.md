@@ -19,7 +19,7 @@ Do not double-click `index.html`: a page opened as a file cannot load its script
 
 Push the repository (`index.html`, `styles.css`, `src/`, `sample/`) to a branch, then **Settings → Pages → Deploy from a branch**, that branch and **/(root)**. The site is then at `https://<user>.github.io/OverGaze/`. Do not commit private datasets. All paths in the app are relative, so it works under a sub-path.
 
-The address bar can open data and set options: `?sample` or `?sample=2d` load a bundled sample; `?video=<url>&gaze=<url1>,<url2>` loads a video and gaze files from links; `sigma=3`, `window=1`, `kernel=gaussian` (or `box`, `triangle`), `past`, `velocity=75`, `rotate=<degrees>` set options. Linked files must be served with CORS headers (see below).
+The address bar can open data and set options: `?sample` or `?sample=2d` load a bundled sample; `?video=<url>&gaze=<url1>,<url2>` loads a video and gaze files from links; `sigma=3`, `window=1`, `kernel=gaussian` (or `box`, `triangle`, `peaked` with `tau=0.25`), `past`, `velocity=75`, `rotate=<degrees>` set options. Linked files must be served with CORS headers (see below).
 
 ## Inputs
 
@@ -136,7 +136,7 @@ All settings redraw the current frame and are written into `settings.json` with 
 | Projection | **360° ERP**: each point adds `exp(−θ² / 2σ²)`, θ = great-circle angle to the point, so blobs widen correctly towards the poles and wrap across the left/right edge. **2D video**: a Gaussian in the image plane, σ in pixels = σ(°) × width / horizontal field of view. |
 | σ (degrees) | Gaussian standard deviation. Kernel cut at 3σ. |
 | Window ± (s) | Temporal pooling. A gaze sample counts for the frame if its time is within the window of the frame centre (plus half a frame); a **fixation** counts once for every frame it covers, like per-frame fixation sets. 0 = only what is active in the frame. |
-| Weight over time | Flat, triangle (fades to zero at the window edge) or **Gaussian (σ = window / 2)**. |
+| Weight over time | Flat, triangle (fades to zero at the window edge), **Gaussian (σ = window / 2)**, or **peaked at the current frame**: weight exp(−\|Δt\| / τ), 1 at the current frame and 0.37 at τ seconds away (τ, the time constant, is set next to it; 0.25 s by default). The window still limits how far back and ahead gaze is taken. |
 | Past only | Causal pooling: only gaze up to this frame. What a live, deployed mask could use. |
 | Weight by duration | Multiplies each fixation by its duration. |
 | Motion compensation | See below. |

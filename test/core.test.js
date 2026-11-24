@@ -481,3 +481,17 @@ test('a stored (uncompressed) .npz from the export writer also loads; a wrong fi
   assert.throws(() => motionFromArrays({}, 'y.npz'), /expected the arrays t_a, t_b and flow/);
   await assert.rejects(readNpz(new Blob([new Uint8Array(100)])), /not an \.npz/);
 });
+
+test('peaked pooling weights fall off as exp(−|Δt| / τ) from the current frame; past only keeps the past half', () => {
+  const fps = 25, rec = [];
+  for (let f = -30; f <= 30; f++) rec.push([(f + 0.5) / fps, (f + 0.5) / fps, 0, 0, 0, 0, 1]);
+  const g = packRecords(rec, ['o'], ['c']);
+  const s = { ...DEFAULTS, windowSec: 1, kernel: 'peaked', peakTauSec: 0.25 };
+  const pts = collectPoints(g, 0.5 / fps, s, { fps });
+  assert.equal(pts.n, 51, 'frames within ±1 s');
+  const ws = Array.from(pts.w.slice(0, pts.n)).sort((a, b) => b - a);
+  close(ws[0], 1, 1e-9, 'the current frame has weight 1');
+  close(ws[1], Math.exp(-(1 / fps) / 0.25), 1e-9, 'one frame away');
+  close(ws[ws.length - 1], Math.exp(-1 / 0.25), 1e-6, '1 s away');
+  assert.equal(collectPoints(g, 0.5 / fps, { ...s, causal: true }, { fps }).n, 26, 'past only: this frame and 25 before');
+});
