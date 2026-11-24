@@ -202,7 +202,7 @@
         <label class="view-switch"><span>Past only (causal, like a live mask)</span><input id="causal" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
         <label class="view-switch"><span>Weight fixations by duration</span><input id="duration-weight" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
         <div class="setting-row"><label for="fps">Video frame rate</label><input id="fps" class="num" type="number" min="1" max="240" step="0.001" value="30"></div>
-        <p id="fps-note" class="hint">Default 30. Measured from decoded frames once the video plays.</p>
+        <p id="fps-note" class="hint">Default 30 until the frame rate is known: it is read from MP4 / MOV files, otherwise measured from decoded frames.</p>
       </div>
 
       <div class="settings-section"><div class="section-title"><span class="section-icon">↝</span> Motion compensation <span class="section-number">03</span></div>
