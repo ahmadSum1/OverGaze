@@ -175,7 +175,7 @@ The readout under the video shows the points in the window, the observers that c
 
 ### Gaze points
 
-**Show gaze points** draws one dot per fixation (or raw gaze sample) in the pooling window, in the observer's colour. Under it, **more**:
+**Show gaze points** draws one dot per fixation (or raw gaze sample) in the pooling window. **Colour = person**: both eyes of a person share it; the left eye (or a recording without a pair) is a circle, the right eye a square of the same area. The 12 colours are bright, ordered so that neighbours in the list differ most (also for colour-blind viewers), and every dot has a dark edge so it shows on bright video too; with more than 12 people they repeat. Under it, **more**:
 
 - **Dot size** in screen pixels (the same in the 360° view at any zoom).
 - **Grow while the eye stays in place**: a dot gains its own size every 0.5 s its eye stays put, up to the cap (× the dot size). Fixation files: by the time into the fixation. Raw gaze samples: while they stay within 1.5° of where the eye arrived.
