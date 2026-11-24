@@ -82,9 +82,11 @@ Reference frame = video frame × *ref. frames per video frame* + *frame offset*.
 
 ![Gaze and Reference buttons](docs/screenshots/14-layer-buttons.png)
 
-**Outline thickness (screen pixels)** in the display panel sets how thick both outlines are drawn, in pixels on the screen. The outlines are traced as lines between the map's pixel centres and drawn on their own layer at screen resolution, so they look the same at every live map width, window size and zoom. In the 360° view the thickness is kept at the centre of the view while you zoom with the wheel (towards the edges of a wide view the projection stretches it, like everything else). Snapshots and recorded videos keep the outlines as thick, relative to the picture, as they look on screen.
+Each outline has its own thickness, in pixels on the screen: **Reference outline thickness** in the reference panel and **Our outline thickness** in the display panel. The outlines are traced as lines between the map's pixel centres and drawn on their own layer at screen resolution, so they look the same at every live map width, window size and zoom. In the 360° view the thickness is kept at the centre of the view while you zoom with the wheel (towards the edges of a wide view the projection stretches it, like everything else). Snapshots and recorded videos keep the outlines as thick, relative to the picture, as they look on screen.
 
 ![Outline thickness](docs/screenshots/15-outline-thickness.png)
+
+![Separate outline thickness](docs/screenshots/17-outline-thickness-each.png)
 
 Right after loading, every reference frame is read once in the background, starting at the playhead, and kept small in memory (at most 512 × 256, one byte per value plus the frame maximum: 79 MB for 600 frames); the status line shows the progress (a 4.9 GB Salient360 `.bin` took 25 s). From then on the reference follows playback frame by frame. Frames not prepared yet are read on demand and the newest ready one is shown; **Hold the video for the reference** pauses playback until the current reference frame is there, so video and reference stay together at the cost of speed.
 

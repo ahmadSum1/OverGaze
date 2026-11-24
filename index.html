@@ -115,6 +115,7 @@
         <label class="view-switch" title="While playing, pause until the reference frame for the current video frame has been read, then go on: video and reference stay together, playback may slow down"><span>Hold the video for the reference</span><input id="ref-hold" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
         <label class="view-switch"><span>Reference heatmap</span><input id="ref-heat" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
         <div class="switch-color"><label class="view-switch"><span>Reference outline</span><input id="ref-outline" type="checkbox" role="switch" checked><span class="switch-track" aria-hidden="true"></span></label><input id="ref-outline-color" type="color" value="#ffffff" title="Colour of the reference outline" aria-label="Colour of the reference outline"></div>
+        <div class="setting-row"><label for="ref-outline-width" title="In pixels on the screen: the same at every map size and zoom">Reference outline thickness (screen pixels)</label><input id="ref-outline-width" class="num" type="number" min="0.5" max="20" step="0.5" value="2"></div>
         <label class="input-label" for="ref-colormap">REFERENCE COLOURS</label>
         <div class="select-wrap"><select id="ref-colormap"></select></div>
         <p id="ref-status" class="hint">No reference loaded.</p>
@@ -246,7 +247,7 @@
         <div class="setting-row"><label for="map-width">Live map width</label><select id="map-width" class="num-select"><option value="256">256</option><option value="512" selected>512</option><option value="1024">1024</option></select></div>
         <div class="setting-row"><label for="cov-thr">Coverage threshold (× frame max)</label><input id="cov-thr" class="num" type="number" min="0.01" max="0.99" step="0.01" value="0.1"></div>
         <div class="switch-color"><label class="view-switch"><span>Outline our coverage area</span><input id="show-outline" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label><input id="outline-color" type="color" value="#c8f56a" title="Colour of our outline" aria-label="Colour of our outline"></div>
-        <div class="setting-row"><label for="outline-width" title="Applies to our outline and the reference outline, in pixels on the screen: the same at every map size and zoom">Outline thickness (screen pixels)</label><input id="outline-width" class="num" type="number" min="0.5" max="20" step="0.5" value="2"></div>
+        <div class="setting-row"><label for="outline-width" title="Our outline, in pixels on the screen: the same at every map size and zoom. The reference outline has its own setting in the reference panel">Our outline thickness (screen pixels)</label><input id="outline-width" class="num" type="number" min="0.5" max="20" step="0.5" value="2"></div>
         <label class="view-switch"><span>Show gaze points</span><input id="show-points" type="checkbox" role="switch" checked><span class="switch-track" aria-hidden="true"></span></label>
       </div>
 
