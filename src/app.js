@@ -7,6 +7,7 @@ import { ZipWriter, encodeGrayPng, npyHeader } from './export.js';
 import { fpsFromDeltas } from './timing.js';
 import { fpsFromMp4File } from './mp4fps.js';
 import { pairEyes, withoutEye } from './pairs.js';
+import { collectMarks } from './marks.js';
 import { compareMaps, openReference, referencesFor, resample } from './reference.js';
 import { PRESETS, pickSettings, presetDifferences, settingsFromJson } from './presets.js';
 import { LayoutConverter, VIEW_MODES, View360 } from './view360.js';
@@ -26,6 +27,7 @@ const state = {
   settings: { ...DEFAULTS, velocity: 0, minDurationMs: 0, eyePairing: 'auto' }, people: null,
   rowRules: [], agreement: null, observerSort: 'name',
   display: { outline: false, outlineColor: '#c8f56a', outlineTouched: false, outlineWidth: 2, mode: 'heat', colormap: 'jet', opacity: 0.65, gamma: 1, mapWidth: 512, showPoints: true, showFlow: false },
+  points: { size: 6, dwell: false, dwellCap: 3, eyeLines: false },
   flow: null, flowInfo: null, analysing: null, exporting: null, recording: null,
   work: {}, last: null, renderQueued: false, projectionTouched: false, density: null,
   library: { videos: [], gaze: [], refs: [] }, tiedTo: null,
@@ -677,19 +679,53 @@ function drawMarks(t, result) {
       g.stroke();
     }
   }
-  if (state.display.showPoints && state.showGaze && result) {
-    const p = result.points;
-    let wmax = 0;
-    for (let i = 0; i < p.n; i++) wmax = Math.max(wmax, p.w[i]);
-    for (let i = 0; i < p.n; i++) {
-      const x = (p.lon[i] / TAU + 0.5) * cw, y = (0.5 - p.lat[i] / Math.PI) * ch;
-      const r = (1.6 + 2.6 * (wmax > 0 ? p.w[i] / wmax : 1)) * dpr;
-      g.beginPath(); g.arc(x, y, r, 0, TAU);
-      g.fillStyle = obsColor(p.obs[i]); g.globalAlpha = 0.35 + 0.65 * (wmax > 0 ? p.w[i] / wmax : 1); g.fill();
-      g.globalAlpha = 1; g.lineWidth = 1 * dpr; g.strokeStyle = 'rgba(0,0,0,0.7)'; g.stroke();
+  state.marksT = t; state.marksResult = !!result;
+  // in the 360° view the points are drawn into the view's source at the view's zoom (draw360), so their size stays
+  // in screen pixels
+  if (state.display.showPoints && state.showGaze && result && !state.view) drawGazePoints(g, t, cw, ch, dpr);
+}
+
+/** Gaze points: one per fixation or sample in the pooling window (see marks.js). */
+function drawGazePoints(g, t, cw, ch, dpr) {
+  const P = state.points, TAU = Math.PI * 2;
+  const marks = collectMarks(state.gaze, t, settingsForRender(), renderContext());
+  const X = m => (m.lon / TAU + 0.5) * cw, Y = m => (0.5 - m.lat / Math.PI) * ch;
+  const base = P.size / 2 * dpr;
+  const radius = m => base * (P.dwell ? Math.min(P.dwellCap, 1 + Math.max(0, m.dwell) / 0.5) : 1);
+  if (P.eyeLines && state.people) {
+    // each person's left and right eye at the same moment: their marks in the current frame
+    const now = new Map(); for (const m of marks) if (m.current) now.set(m.obs, m);
+    g.save(); g.setLineDash([4 * dpr, 3 * dpr]); g.lineWidth = 1 * dpr; g.strokeStyle = 'rgba(255,255,255,0.8)';
+    for (const p of peopleNow()) {
+      const a = now.get(p.left), b = now.get(p.right);
+      if (!a || !b || Math.abs(X(a) - X(b)) > cw / 2) continue;
+      g.beginPath(); g.moveTo(X(a), Y(a)); g.lineTo(X(b), Y(b)); g.stroke();
     }
+    g.restore();
+  }
+  // largest first, so small dots stay visible on top
+  marks.sort((a, b) => radius(b) - radius(a));
+  for (const m of marks) {
+    g.beginPath(); g.arc(X(m), Y(m), radius(m), 0, TAU);
+    g.fillStyle = obsColor(m.obs); g.globalAlpha = 0.35 + 0.65 * m.w; g.fill();
+    g.globalAlpha = 1; g.lineWidth = 1 * dpr; g.strokeStyle = 'rgba(0,0,0,0.7)'; g.stroke();
   }
 }
+function pointsJson() { const P = state.points; return { show: state.display.showPoints, dot_size_px: P.size, grow_while_in_place: P.dwell, grow_cap_times_size: P.dwellCap, grow_rule: 'radius × (1 + time in place / 0.5 s), up to the cap; fixations: time into the fixation; raw samples: time within 1.5° of where the eye arrived', join_eyes: P.eyeLines }; }
+function applyPoints(o = {}) {
+  const P = state.points;
+  if ('show' in o) { state.display.showPoints = !!o.show; $('show-points').checked = !!o.show; }
+  if (Number(o.dot_size_px) > 0) P.size = Math.min(30, Math.max(2, Number(o.dot_size_px)));
+  if ('grow_while_in_place' in o) P.dwell = !!o.grow_while_in_place;
+  if (Number(o.grow_cap_times_size) >= 1) P.dwellCap = Math.min(10, Number(o.grow_cap_times_size));
+  if ('join_eyes' in o) P.eyeLines = !!o.join_eyes;
+  $('point-size').value = String(P.size); $('point-dwell').checked = P.dwell; $('point-dwell-cap').value = String(P.dwellCap); $('point-eye-lines').checked = P.eyeLines;
+  requestRender();
+}
+$('point-size').addEventListener('change', e => applyPoints({ dot_size_px: e.target.value }));
+$('point-dwell').addEventListener('change', e => applyPoints({ grow_while_in_place: e.target.checked }));
+$('point-dwell-cap').addEventListener('change', e => applyPoints({ grow_cap_times_size: e.target.value }));
+$('point-eye-lines').addEventListener('change', e => applyPoints({ join_eyes: e.target.checked }));
 
 // ---------- density strip ----------
 function computeDensity() {
@@ -1372,8 +1408,9 @@ $('template-input').addEventListener('change', async e => {
   const f = e.target.files[0]; e.target.value = '';
   if (!f) return;
   try {
-    const { name, settings, rowRules } = settingsFromJson(JSON.parse(await f.text()));
+    const raw = JSON.parse(await f.text()), { name, settings, rowRules } = settingsFromJson(raw);
     applySettings(settings);
+    if (raw.display?.gaze_points) applyPoints(raw.display.gaze_points);
     if (rowRules) setRowRules(rowRules);
     const list = loadTemplates(), label = name || f.name.replace(/\.(overgaze\.)?json$/i, '');
     list.push({ name: label, settings });
@@ -1463,6 +1500,7 @@ function settingsJson(extra = {}) {
       observers_used: g.observers.filter((_, i) => state.observerEnabled[i]), conditions_used: g.conditions.filter((_, i) => state.conditionEnabled[i]),
       column_mapping: state.mapping
     } : null,
+    display: { gaze_points: pointsJson() },
     saliency: {
       projection: s.projection, sigma_deg: s.sigmaDeg, kernel_cutoff_sigma: s.truncate, planar_fov_deg: s.projection === 'planar' ? s.planarFovDeg : undefined,
       pooling_window_s: s.windowSec, pooling_weight: s.kernel, peaked_tau_s: s.kernel === 'peaked' ? (s.peakTauSec ?? 0.25) : undefined, causal: s.causal, weight_by_duration: s.durationWeight,
@@ -1681,6 +1719,7 @@ function drawComposite(c, perScreenPixel) {
   const stageWidth = $('stage').getBoundingClientRect().width || c.width;
   drawOutlines(g, c.width, c.height, perScreenPixel ?? c.width / stageWidth);
   g.drawImage(marksCanvas, 0, 0, c.width, c.height);
+  if (state.view && c === state.viewSource && state.display.showPoints && state.showGaze && state.marksResult && state.gaze) drawGazePoints(g, state.marksT, c.width, c.height, perScreenPixel);
 }
 $('export-snapshot').addEventListener('click', () => {
   render();

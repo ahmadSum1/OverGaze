@@ -254,6 +254,13 @@
         <div class="switch-color"><label class="view-switch"><span>Outline our coverage area</span><input id="show-outline" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label><input id="outline-color" type="color" value="#c8f56a" title="Colour of our outline" aria-label="Colour of our outline"></div>
         <div class="setting-row"><label for="outline-width" title="Our outline, in pixels on the screen: the same at every map size and zoom. The reference outline has its own setting in the reference panel">Our outline thickness (screen pixels)</label><input id="outline-width" class="num" type="number" min="0.5" max="20" step="0.5" value="2"></div>
         <label class="view-switch"><span>Show gaze points</span><input id="show-points" type="checkbox" role="switch" checked><span class="switch-track" aria-hidden="true"></span></label>
+        <details id="points-more" class="more"><summary>more</summary>
+          <div class="setting-row"><label for="point-size">Dot size (screen pixels)</label><input id="point-size" class="num" type="number" min="2" max="30" step="1" value="6"></div>
+          <label class="view-switch"><span>Grow while the eye stays in place</span><input id="point-dwell" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
+          <div class="setting-row"><label for="point-dwell-cap">Grow up to (× the dot size)</label><input id="point-dwell-cap" class="num" type="number" min="1" max="10" step="0.5" value="3"></div>
+          <p class="hint">A dot gains its own size every 0.5 s its eye stays put, up to the cap: fixations by the time into the fixation, raw gaze samples while they stay within 1.5° of where the eye arrived.</p>
+          <label class="view-switch"><span>Join each person's two eyes (dashed line)</span><input id="point-eye-lines" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
+        </details>
       </div>
 
       <div class="settings-section"><div class="section-title"><span class="section-icon">⇩</span> Export <span class="section-number">06</span></div>
