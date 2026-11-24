@@ -213,7 +213,7 @@ video.addEventListener('loadedmetadata', () => {
   $('video-duration').textContent = `${fmt(video.duration, 2)} s`;
   $('viewer-name').textContent = state.video.name;
   $('scrubber').max = String(video.duration || 1);
-  $('ex-start').value = '0'; $('ex-end').value = fmt(video.duration, 2);
+  $('ex-start').value = '0'; $('ex-end').value = fmt(video.duration, 2); state.rangesTouched = false;
   ['play', 'prev-frame', 'next-frame', 'scrubber'].forEach(id => { $(id).disabled = false; });
   setStatus('Video ready');
   // Gaze in pixels that was loaded before the video: now the frame size is known, so are the value ranges.
@@ -226,6 +226,7 @@ video.addEventListener('loadedmetadata', () => {
   updateSubtitle(); updateButtons(); updateExportSummary(); drawDensity();
   detectFps();
   tieToVideo();
+  defaultRangesToGaze();
 });
 
 video.addEventListener('loadeddata', () => {
@@ -1005,6 +1006,37 @@ function onMappingChange(e) {
 }
 document.querySelectorAll('[data-map]').forEach(el => el.addEventListener('change', onMappingChange));
 
+/**
+ * Time ranges: 'all' = the whole video, 'export' = the export From / To, 'gaze' = from the first to the last gaze time,
+ * widened by the pooling window on each side (the window reaches that far), within the video.
+ */
+function gazeRange() {
+  const g = state.gaze, d = video.duration || Infinity;
+  if (!g) return null;
+  const pad = Math.max(0, state.settings.windowSec);
+  return [Math.max(0, g.tMin - pad), Math.min(d, g.tMax + pad)];
+}
+function rangeOf(kind) {
+  const d = video.duration || 0;
+  if (kind === 'export') return [Math.max(0, Number($('ex-start').value) || 0), Math.min(d, Number($('ex-end').value) || d)];
+  if (kind === 'gaze') return gazeRange() || [0, d];
+  return [0, d];
+}
+/**
+ * When the gaze covers only a small part of a long video (a full YouTube download with a 30 s clip of gaze), the
+ * export range and the motion range start out as the gaze range, unless they were already changed by hand.
+ */
+function defaultRangesToGaze() {
+  const r = gazeRange(), d = video.duration;
+  if (!r || !d || state.rangesTouched) return;
+  if (d < 1.5 * (r[1] - r[0]) + 10) return;
+  $('ex-start').value = fmt(r[0], 2); $('ex-end').value = fmt(r[1], 2);
+  $('flow-range').value = 'gaze';
+  updateExportSummary(); drawDensity();
+  notice(`The video lasts ${fmt(d, 1)} s but the gaze covers ${fmt(state.gaze.tMin, 1)}–${fmt(state.gaze.tMax, 1)} s: the export range and the motion range are set to the gaze range (${fmt(r[0], 1)}–${fmt(r[1], 1)} s, the pooling window added on each side).`);
+}
+['ex-start', 'ex-end', 'flow-range'].forEach(id => $(id).addEventListener('change', e => { if (e.isTrusted) state.rangesTouched = true; }));
+
 function rebuildGaze() {
   $('mapping-error').hidden = true;
   if (!state.files.length) return;
@@ -1026,6 +1058,7 @@ function rebuildGaze() {
   }
   renderRules(); scheduleAgreement();
   renderGroups(); updateGazeSummary(); drawDensity(); updateSubtitle(); updateButtons(); updateExportSummary(); requestRender();
+  defaultRangesToGaze();
 }
 
 /**
@@ -1250,8 +1283,8 @@ async function analyseMotion() {
   const [vw, vh] = videoSize();
   const rate = Number($('flow-rate').value), [W, H] = mapSize(Number($('flow-width').value), state.settings, vw, vh);
   const wrap = state.settings.projection === 'erp';
-  let a = 0, b = video.duration;
-  if ($('flow-range').value === 'export') { a = Math.max(0, Number($('ex-start').value) || 0); b = Math.min(video.duration, Number($('ex-end').value) || video.duration); }
+  const [a, b] = rangeOf($('flow-range').value);
+  if (!(b > a)) { showError('The motion range is empty: check the export range, or load gaze for the gaze range.'); return; }
   const store = state.flow && state.flow.W === W && state.flow.H === H && state.flow.wrap === wrap ? state.flow : new FlowStore(W, H, { wrap });
   const job = { cancel: false };
   state.analysing = job;
@@ -1577,8 +1610,8 @@ function updateExportSummary() {
   drawPlayhead();
 }
 ['ex-start', 'ex-end', 'ex-step', 'ex-width', 'ex-format', 'ex-norm'].forEach(id => $(id).addEventListener('change', updateExportSummary));
-$('ex-start-here').addEventListener('click', () => { $('ex-start').value = fmt(video.currentTime, 3); updateExportSummary(); });
-$('ex-end-here').addEventListener('click', () => { $('ex-end').value = fmt(video.currentTime, 3); updateExportSummary(); });
+$('ex-start-here').addEventListener('click', () => { $('ex-start').value = fmt(video.currentTime, 3); state.rangesTouched = true; updateExportSummary(); });
+$('ex-end-here').addEventListener('click', () => { $('ex-end').value = fmt(video.currentTime, 3); state.rangesTouched = true; updateExportSummary(); });
 
 function settingsJson(extra = {}) {
   const s = state.settings, g = state.gaze, [vw, vh] = videoSize();
