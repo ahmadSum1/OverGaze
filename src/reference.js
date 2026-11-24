@@ -1,6 +1,8 @@
 // Reference (ground-truth) saliency maps to compare with: Salient360 .bin sequences, .npy arrays, a single image,
 // or one image per frame. Frames are read on demand (File.slice), so multi-gigabyte files never sit in memory.
 
+import { pathMatchesVideo } from './gaze.js';
+
 const BIN_NAME = /_(\d+)x(\d+)x(\d+)_32b\.bin$/i;
 const IMAGE = /\.(png|jpe?g|webp|bmp)$/i;
 
@@ -135,4 +137,16 @@ export function compareMaps(a, b, frac = 0.1) {
     if (ia) ca++; if (ib) cb++; if (ia && ib) both++; if (ia || ib) either++;
   }
   return { cc: saa > 0 && sbb > 0 ? sab / Math.sqrt(saa * sbb) : NaN, coverageA: ca / n, coverageB: cb / n, iou: either ? both / either : NaN, maxB: xb };
+}
+
+/**
+ * Reference files that belong to a video (key = video name without extension): matched like gaze files, plus folders
+ * named <set>_<video> (maps_mc3_vret/vret_001/sal.npy). One .bin (preferred) or .npy, or else all matching images.
+ */
+export function referencesFor(files, key) {
+  const fits = f => { const p = f.webkitRelativePath || f.path || f.name; return pathMatchesVideo(p, key) || p.split('/').slice(0, -1).some(d => d.endsWith('_' + key)); };
+  const mine = files.filter(fits), rank = f => /\.bin$/i.test(f.name) ? 0 : /\.npy$/i.test(f.name) ? 1 : 2;
+  if (!mine.length) return [];
+  const best = Math.min(...mine.map(rank));
+  return best < 2 ? [mine.filter(f => rank(f) === best).sort((a, b) => a.name.localeCompare(b.name))[0]] : mine;
 }

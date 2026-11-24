@@ -47,6 +47,10 @@ Both are recognised on sight; their usual settings are filled in and written in 
 
 The box **Only files whose path contains** overrides the automatic choice of files.
 
+### Many videos at once
+
+**Load folder** in panel A takes a folder of videos (for example Salient360's `Video_Stimuli/Stimuli`, 19 videos); pick one in the list or step with ‹ ›. Gaze files and reference maps can then be loaded once for all videos, as folders: every file is remembered, and each time another video is opened, its own fixation files and reference are taken by name and the others are left out. Names match when a folder is called like the video (YT360), a file name starts with the video name and `.` or `_` (VR-EyeTracking, Salient360 `2_Diner_fixations.csv`, `2_Diner_2048x1024x600_32b.bin`), or a folder ends in `_<video name>` (`maps_mc3_vret/vret_001/sal.npy`). Among references a `.bin` is preferred to a `.npy`, and both to images. **Folder** in panel E loads such a reference folder; **clear all** and **Clear** forget the remembered files.
+
 **Load files** and **Load folder** add to what is loaded when the new files have the same columns (one column mapping serves them all). A file counts as loaded already when its name, size and date match, however it was chosen; different files with the same name (say `L/x.csv` and `R/x.csv` chosen one at a time) are both kept and told apart as `x` and `x (2)`; files of another format replace the loaded ones. **clear all** removes every gaze file. In the observer list, × removes one observer (with one observer per file, that file) and *bring back* restores them. Notices and errors close with their ×, and loading another video clears the old error.
 
 **Something wrong?** **Copy debug details** (in the export panel and the help menu) copies a plain-text report: browser and the video codecs it can play, the video (size, frame rate, errors), every gaze file used with its row count, files that could not be read or had other columns, the column mapping and any mapping error, settings, motion analysis, and every notice and error so far. Paste it into a message or bug report.
@@ -59,7 +63,7 @@ The box **Only files whose path contains** overrides the automatic choice of fil
 - a `.npy` array (frames, height, width) or (height, width), float16 / 32 / 64 or uint8, such as the `sal.npy` of the pooled training maps,
 - one image (a static map such as `<n>_<Name>_saliency.png`) or one image per frame (ordered by the number in the name).
 
-Reference frame = video frame × *ref. frames per video frame* + *frame offset*. Right after loading, every reference frame is read once in the background, starting at the playhead, and kept small in memory (at most 512 × 256, one byte per value plus the frame maximum: 79 MB for 600 frames); the status line shows the progress (a 4.9 GB Salient360 `.bin` took 25 s). From then on the reference follows playback frame by frame. Frames not prepared yet are read on demand and the newest ready one is shown; **Hold the video for the reference** pauses playback until the current reference frame is there, so video and reference stay together at the cost of speed.
+Reference frame = video frame × *ref. frames per video frame* + *frame offset*. Display: **Reference heatmap** (its own layer under ours, in its own colour map) and **Reference outline** (the area at or above the coverage threshold, white by default) each have a switch; **Outline our coverage area** in the display panel draws ours (lime by default) and switches on by itself when a reference is loaded, unless you set it. Both outline colours can be picked next to their switches. The **Gaze** and **Reference** buttons above the video switch our whole layer and the reference heatmap. Right after loading, every reference frame is read once in the background, starting at the playhead, and kept small in memory (at most 512 × 256, one byte per value plus the frame maximum: 79 MB for 600 frames); the status line shows the progress (a 4.9 GB Salient360 `.bin` took 25 s). From then on the reference follows playback frame by frame. Frames not prepared yet are read on demand and the newest ready one is shown; **Hold the video for the reference** pauses playback until the current reference frame is there, so video and reference stay together at the cost of speed.
 
 Salient360 note: several of its videos (2_Diner, 5_Waterpark, 8_Sofa, 10_Cows, 18_Bar …) are stored as 3840 × 1920 with non-square pixels, so the browser shows them as 3840 × 2048 or 3840 × 2160. The picture is still the whole sphere, only stretched, and the overlay is stretched with it, so nothing shifts: on 5_Waterpark the map from the fixation files matches the `.bin` at CC 1.000 with 97–98 % overlap. Loading a Salient360 `.bin` also sets the projection to 360°. Switches: **Reference heatmap** (its own layer under ours, in its own colours, “ice” by default) and **Outlines** of the area at or above the coverage threshold (reference white, ours lime). The **Gaze** and **Reference** buttons above the video switch our layer (heatmap, points, outline) and the reference heatmap on and off, so either can be seen alone or both together. The readout **vs reference** gives the correlation of the two maps (CC), the overlap of the two thresholded areas (intersection over union) and the reference's coverage. The **coverage threshold** (display panel, default 0.1 × frame maximum) applies to the outlines, the coverage readout and the coverage written into `frames.csv`; **Outline the coverage area** draws our outline without a reference.
 
@@ -115,7 +119,24 @@ All settings redraw the current frame and are written into `settings.json` with 
 | Rotate / flip | Longitude offset and left–right / up–down flips, for orientation checks. |
 | Display | Heatmap (alpha rises with saliency), flat heatmap, spotlight (darkens what nobody looks at), grey map as exported, or off; colour map, opacity, gamma, live map width, gaze points coloured by observer. |
 
-**Match the dataset maps** sets σ 3°, ±1 s with Gaussian weights and the 75°/s filter (0 for fixation data), and turns motion compensation on once the motion has been analysed. This is the recipe behind the pooled training maps of the video-saliency data (see [docs/validation.md](docs/validation.md)).
+### Presets, templates, import and export
+
+The **Preset** list (top of the settings) sets everything that changes the maps at once, and says where the values come from:
+
+| preset | σ | window | other | source |
+|---|---|---|---|---|
+| Salient360: head + eye maps | 2° | this frame | both eyes (L + R files), no speed filter | David et al., MMSys 2018 and the dataset readme: a 2° Gaussian per eye fixation, both eyes combined, one map per frame; fixations were parsed by the authors (below 80°/s, at least 80 ms). Matches the `.bin` maps at CC 1.000. Set automatically when Salient360 fixation files are recognised. |
+| Salient360: 200 ms pooling | 2° | ±0.1 s, flat | | the paper's comparisons (section 4.2): frames pooled in 200 ms intervals, summed and normalised |
+| Salient360: head-only maps | 3.34° | this frame | | the dataset's head-only maps (viewport centre of each head sample) |
+| Video-saliency training maps “mc3” | 3° | ±1 s, Gaussian (σ 0.5 s) | motion compensation, 75°/s for raw gaze | the pooled VR-EyeTracking / YT360 training maps (see [docs/validation.md](docs/validation.md)) |
+| Live mask | 3° | past 1 s, fading | causal | what a real-time mask could use |
+| OverGaze defaults | 2° | this frame | | |
+
+Once any of these settings differs from the chosen preset or template, the menu shows **(custom <preset name>)** and a line under it lists what changed. Choosing the preset itself again restores its values. Only the settings a preset sets are compared: the defaults say nothing about the projection, so they stay "not custom" on 2D video. A motion-compensated preset is not counted as changed while it waits for **Analyse motion**.
+
+![Custom preset](docs/screenshots/13-custom-preset.png)
+
+**Save as template** keeps the current settings under a name in this browser (they appear under *My templates*; **Delete** removes one). **Export settings** downloads them as a small `.overgaze.json` file; **Import settings** reads such a file, or the `settings.json` of any map export, applies it and keeps it as a template.
 
 ![Pooling settings](docs/screenshots/06-pooling-settings.png)
 

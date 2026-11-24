@@ -3,7 +3,8 @@ import { DEFAULTS, coverage, frameCentre, frameOf, mapSize, renderMap } from './
 import { FlowStore, toGray } from './flow.js';
 import { ZipWriter, encodeGrayPng, npyHeader } from './export.js';
 import { fpsFromDeltas } from './timing.js';
-import { compareMaps, openReference, resample } from './reference.js';
+import { compareMaps, openReference, referencesFor, resample } from './reference.js';
+import { PRESETS, pickSettings, presetDifferences, settingsFromJson } from './presets.js';
 import { LayoutConverter, VIEW_MODES, View360 } from './view360.js';
 import { CUBE_LAYOUTS, DEFAULT_OPTIONS, LAYOUTS, erpSize, faceTables } from './projections.js';
 import { COLORMAPS, colorize, cssGradient } from './colormap.js';
@@ -18,10 +19,11 @@ const state = {
   video: null, fps: 30, fpsSource: 'default', fpsDeltas: [], lastFrameMeta: null, mediaTime: 0,
   files: [], mapping: null, gazeAll: null, gaze: null, observerEnabled: null, conditionEnabled: null,
   settings: { ...DEFAULTS, velocity: 0 },
-  display: { mode: 'heat', colormap: 'jet', opacity: 0.65, gamma: 1, mapWidth: 512, showPoints: true, showFlow: false },
+  display: { outline: false, outlineColor: '#c8f56a', outlineTouched: false, mode: 'heat', colormap: 'jet', opacity: 0.65, gamma: 1, mapWidth: 512, showPoints: true, showFlow: false },
   flow: null, flowInfo: null, analysing: null, exporting: null, recording: null,
   work: {}, last: null, renderQueued: false, projectionTouched: false, density: null,
-  ref: null, refShow: { heat: false, outline: true }, showGaze: true, removedObservers: new Set(), view: null,
+  library: { videos: [], gaze: [], refs: [] }, tiedTo: null,
+  ref: null, refShow: { heat: false, outline: true, outlineColor: '#ffffff' }, showGaze: true, removedObservers: new Set(), view: null,
   layout: 'erp', layoutTouched: false, layoutOpts: { ...DEFAULT_OPTIONS }, converter: null
 };
 
@@ -191,6 +193,7 @@ video.addEventListener('loadedmetadata', () => {
   }
   updateSubtitle(); updateButtons(); updateExportSummary(); drawDensity();
   detectFps();
+  tieToVideo();
 });
 
 video.addEventListener('loadeddata', () => {
@@ -305,6 +308,7 @@ function seekSeconds(dt) { if (!state.video) return; video.currentTime = Math.ma
 
 // ---------- rendering ----------
 function requestRender() {
+  refreshPresetLabel();
   if (state.renderQueued) return;
   state.renderQueued = true;
   requestAnimationFrame(() => { state.renderQueued = false; render(); });
@@ -342,9 +346,11 @@ function render() {
     $('readout-badge').textContent = `σ ${state.settings.sigmaDeg}° · ±${state.settings.windowSec} s${state.settings.causal ? ' past' : ''}${state.settings.motionComp && state.flow ? ' · motion-comp.' : ''}`;
   }
   const wrapX = state.settings.projection === 'erp', refOutline = !!(state.ref && state.refShow.outline);
+  const rgb = hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
   if (state.showGaze && state.display.mode !== 'off' && result) colorize(result.map, img.data, colorOpts);
-  if (refOutline && ref) outline(ref.map, W, H, thr, [255, 255, 255], img.data, wrapX);
-  if (state.showGaze && (refOutline || state.display.outline) && result && result.max > 0) outline(result.map, W, H, thr, [200, 245, 106], img.data, wrapX);
+  // the two outlines are independent: each has its own switch and colour
+  if (refOutline && ref) outline(ref.map, W, H, thr, rgb(state.refShow.outlineColor), img.data, wrapX);
+  if (state.showGaze && state.display.outline && result && result.max > 0) outline(result.map, W, H, thr, rgb(state.display.outlineColor), img.data, wrapX);
   hctx.putImageData(img, 0, 0);
   // the reference heatmap has its own layer (under ours) and its own colours
   const rctx = refCanvas.getContext('2d');
@@ -463,6 +469,7 @@ async function loadReference(files) {
     if (R.N > 1 && vFrames && Math.abs(R.N - vFrames) > 2) msgs.push(`It has ${R.N} frames and the video about ${vFrames}: set “Ref. frames per video frame” (e.g. ${fmt(R.N / vFrames, 3)}) or the offset if they do not line up.`);
     notice(msgs.join(' '), R.N > 1 && vFrames && Math.abs(R.N - vFrames) > 2);
     R.hold = $('ref-hold').checked;
+    if (!state.display.outlineTouched) { state.display.outline = true; $('show-outline').checked = true; }   // ours next to the reference's, to compare
     requestRender();
     prepareReference(R);
   } catch (e) { notice(`Could not open the reference: ${e.message}`, true); }
@@ -505,13 +512,47 @@ async function prepareReference(R) {
   await Promise.all([worker(), worker()]);
 }
 $('choose-ref').addEventListener('click', () => $('ref-input').click());
-$('ref-input').addEventListener('change', e => { if (e.target.files.length) loadReference([...e.target.files]); e.target.value = ''; });
-$('clear-ref').addEventListener('click', () => { state.ref = null; syncLayerChips(); $('ref-name').textContent = $('ref-size').textContent = '—'; $('ref-status').textContent = 'No reference loaded.'; $('clear-ref').disabled = true; requestRender(); });
+$('ref-input').addEventListener('change', e => { if (e.target.files.length) chooseReferences([...e.target.files]); e.target.value = ''; });
+$('choose-ref-folder').addEventListener('click', () => $('ref-folder-input').click());
+$('ref-folder-input').addEventListener('change', e => { if (e.target.files.length) chooseReferences([...e.target.files], true); e.target.value = ''; });
+const REF_EXT = /\.(bin|npy|png|jpe?g|webp|bmp)$/i;
+/** One file or one image sequence opens directly; several (a folder of maps for many videos) become a library. */
+function chooseReferences(files, folder = false) {
+  files = files.filter(f => REF_EXT.test(f.name) && !f.name.startsWith('.'));
+  if (!files.length) { notice('No reference maps found (.bin, .npy or images).', true); return; }
+  const arrays = files.filter(f => /\.(bin|npy)$/i.test(f.name));
+  if (!folder && (files.length === 1 || !arrays.length)) {
+    const key = state.video ? stem(state.video.name) : '', mine = key && files.length > 1 ? referencesFor(files, key) : [];
+    loadReference(mine.length ? mine : files);
+    return;
+  }
+  state.library.refs = files;
+  if (!state.video) { notice(`${files.length} reference files kept; open a video to use its own.`); return; }
+  tieReference();
+}
+function tieReference() {
+  if (!state.library.refs.length || !state.video) return;
+  const key = stem(state.video.name), mine = referencesFor(state.library.refs, key);
+  if (mine.length) loadReference(mine);
+  else { state.ref = null; syncLayerChips(); requestRender(); notice(`None of the ${state.library.refs.length} reference files belongs to “${key}”.`, true); }
+}
+/** After another video is opened: take its own fixation files and reference from what was loaded before. */
+async function tieToVideo() {
+  if (!state.video || state.tiedTo === state.video) return;
+  const first = !state.tiedTo;
+  state.tiedTo = state.video;
+  if (state.library.gaze.length && !first) { clearGaze(true); await loadGazeFiles(state.library.gaze, { fromLibrary: true }); }
+  else if (state.library.gaze.length && first && !state.files.length) await loadGazeFiles(state.library.gaze, { fromLibrary: true });
+  if (state.library.refs.length) tieReference();
+}
+$('clear-ref').addEventListener('click', () => { state.ref = null; state.library.refs = []; syncLayerChips(); $('ref-name').textContent = $('ref-size').textContent = '—'; $('ref-status').textContent = 'No reference loaded.'; $('clear-ref').disabled = true; requestRender(); });
 $('ref-hold').addEventListener('change', e => { if (state.ref) state.ref.hold = e.target.checked; if (!e.target.checked) resumeAfterReference(); });
 $('ref-offset').addEventListener('change', e => { if (state.ref) { state.ref.offset = Math.round(Number(e.target.value) || 0); requestRender(); } });
 $('ref-scale').addEventListener('change', e => { if (state.ref) { state.ref.scale = Math.max(0.001, Number(e.target.value) || 1); requestRender(); } });
 $('ref-heat').addEventListener('change', e => { state.refShow.heat = e.target.checked; syncLayerChips(); requestRender(); });
 $('ref-outline').addEventListener('change', e => { state.refShow.outline = e.target.checked; requestRender(); });
+$('ref-outline-color').addEventListener('input', e => { state.refShow.outlineColor = e.target.value; requestRender(); });
+$('outline-color').addEventListener('input', e => { state.display.outlineColor = e.target.value; requestRender(); });
 $('ref-colormap').innerHTML = COLORMAPS.map(c => `<option value="${c}">${c[0].toUpperCase() + c.slice(1)}</option>`).join('');
 $('ref-colormap').value = 'ice';
 $('ref-colormap').addEventListener('change', e => { state.refColormap = e.target.value; requestRender(); });
@@ -648,9 +689,14 @@ densityCanvas.addEventListener('click', e => {
 });
 
 // ---------- gaze loading ----------
-async function loadGazeFiles(list) {
+async function loadGazeFiles(list, { fromLibrary = false } = {}) {
   const chosen = list.length;   // a FileList empties when its input is reset
   let files = [...list].filter(f => GAZE_EXT.test(f.name) && !f.name.startsWith('.'));
+  if (!fromLibrary && files.length > 1) {
+    // keep every file chosen: when another video is opened, its own files are taken from these
+    const key = f => `${f.webkitRelativePath || f.name}|${f.size}|${f.lastModified}`, have = new Set(state.library.gaze.map(key));
+    state.library.gaze = state.library.gaze.concat(files.filter(f => !have.has(key(f))));
+  }
   if (!files.length) { notice('No gaze files found (expected .csv, .tsv, .txt, .json, .arff or .dat).', true); return; }
   const relOf = f => f.webkitRelativePath || f.relativePath || f.name;
   const userFilter = $('gaze-filter').value.trim();
@@ -729,6 +775,11 @@ function applyDatasetDefaults(m) {
   if (m.preset === 'vret') {
     applySettings({ velocity: 75 });
     msg.push('Recognised VR-EyeTracking gaze (eye position, y from the bottom, one sample per frame): speed filter set to 75°/s.');
+  }
+  if (m.preset === 's360') {
+    const p = PRESETS.find(x => x.id === 'salient360-he');
+    applySettings(p.settings); renderPresetList('p:salient360-he'); $('preset-about').textContent = p.about;
+    msg.push('Recognised Salient360 fixations: the Salient360 head + eye preset is set (σ 2°, per frame, both eyes).');
   }
   if (m.preset === 'yt360frames') {
     applySettings({ velocity: 0 });
@@ -847,13 +898,14 @@ $('observer-list').addEventListener('click', e => {
   if (r) { (state.removedObservers ||= new Set()).add(state.gaze.observers[Number(r.dataset.remove)]); rebuildGaze(); return; }
   if (e.target.id === 'restore-observers') { state.removedObservers = new Set(); rebuildGaze(); }
 });
-function clearGaze() {
+function clearGaze(quiet = false) {
+  if (!quiet) state.library.gaze = [];
   Object.assign(state, { files: [], mapping: null, gazeAll: null, gaze: null, observerEnabled: null, conditionEnabled: null, removedObservers: new Set(), loadReport: null });
   $('mapping-section').hidden = true; $('mapping-error').hidden = true;
   renderGroups(); updateGazeSummary(); drawDensity(); updateSubtitle(); updateButtons(); updateExportSummary(); requestRender();
-  notice('Gaze cleared.');
+  if (!quiet) notice('Gaze cleared.');
 }
-$('clear-gaze').addEventListener('click', clearGaze);
+$('clear-gaze').addEventListener('click', () => clearGaze());
 $('observer-list').addEventListener('change', e => { const i = e.target.dataset.obs; if (i == null) return; state.observerEnabled[i] = e.target.checked ? 1 : 0; drawDensity(); requestRender(); });
 $('condition-list').addEventListener('change', e => { const i = e.target.dataset.cond; if (i == null) return; state.conditionEnabled[i] = e.target.checked ? 1 : 0; drawDensity(); requestRender(); });
 $('obs-all').addEventListener('click', () => { if (!state.gaze) return; state.observerEnabled.fill(1); renderGroups(); drawDensity(); requestRender(); });
@@ -972,7 +1024,7 @@ $('kernel').addEventListener('change', e => { state.settings.kernel = e.target.v
 $('causal').addEventListener('change', e => { state.settings.causal = e.target.checked; onSettings(); });
 $('duration-weight').addEventListener('change', e => { state.settings.durationWeight = e.target.checked; onSettings(); });
 $('fps').addEventListener('change', e => { const f = Number(e.target.value); if (f > 0) { setFps(f, 'manual'); if (/^frame/.test(state.mapping?.timeUnit) || /^frame/.test(state.mapping?.durationUnit)) rebuildGaze(); } });
-$('motion').addEventListener('change', e => { state.settings.motionComp = e.target.checked; onSettings(); });
+$('motion').addEventListener('change', e => { state.settings.motionComp = e.target.checked; state.wantMotion = e.target.checked; onSettings(); });
 $('show-flow').addEventListener('change', e => { state.display.showFlow = e.target.checked; requestRender(); });
 $('vel').addEventListener('change', e => { state.settings.velocity = Math.max(0, Number(e.target.value) || 0); if (state.gazeAll) { state.gaze = velocityFilter(state.gazeAll, state.settings.velocity); updateGazeSummary(); drawDensity(); } onSettings(); });
 $('flip-x').addEventListener('change', e => { state.settings.flipX = e.target.checked; onSettings(); });
@@ -984,7 +1036,7 @@ $('color-ramp').style.background = cssGradient('jet');
 $('opacity').addEventListener('input', e => { state.display.opacity = Number(e.target.value) / 100; $('opacity-value').textContent = `${e.target.value}%`; requestRender(); });
 $('gamma').addEventListener('input', e => { state.display.gamma = Number(e.target.value); $('gamma-value').textContent = Number(e.target.value).toFixed(2); requestRender(); });
 $('map-width').addEventListener('change', e => { state.display.mapWidth = Number(e.target.value); requestRender(); });
-$('show-outline').addEventListener('change', e => { state.display.outline = e.target.checked; requestRender(); });
+$('show-outline').addEventListener('change', e => { state.display.outline = e.target.checked; state.display.outlineTouched = true; requestRender(); });
 $('show-points').addEventListener('change', e => { state.display.showPoints = e.target.checked; requestRender(); });
 $('speed').addEventListener('change', e => { video.playbackRate = Number(e.target.value); });
 function onSettings() { updateExportSummary(); requestRender(); }
@@ -1001,9 +1053,98 @@ function applySettings(o) {
     S.velocity = Math.max(0, Number(o.velocity) || 0); $('vel').value = String(S.velocity);
     if (state.gazeAll) { state.gaze = velocityFilter(state.gazeAll, S.velocity); updateGazeSummary(); drawDensity(); }
   }
+  if (o.projection === 'erp' || o.projection === 'planar') { S.projection = o.projection; $('projection').value = o.projection; $('fov-row').hidden = o.projection !== 'planar'; state.projectionTouched = true; updateSubtitle(); updateButtons(); }
+  if ('planarFovDeg' in o) { S.planarFovDeg = Math.max(1, Number(o.planarFovDeg) || 90); $('fov').value = String(S.planarFovDeg); }
+  if ('truncate' in o) S.truncate = Math.max(1, Number(o.truncate) || 3);
+  if ('coverageThreshold' in o) { S.coverageThreshold = Math.min(0.99, Math.max(0.001, Number(o.coverageThreshold) || 0.1)); $('cov-thr').value = String(S.coverageThreshold); $('ro-coverage-label').textContent = `COVERAGE ≥ ${S.coverageThreshold} MAX`; }
   onSettings();
 }
-$('preset-dataset').addEventListener('click', () => applySettings({ sigmaDeg: 3, windowSec: 1, kernel: 'gaussian', causal: false, motionComp: true, velocity: state.mapping?.preset === 'yt360' ? 0 : 75 }));
+// ---------- presets and saved templates ----------
+const TEMPLATE_KEY = 'overgaze.templates';
+function loadTemplates() { try { return JSON.parse(localStorage.getItem(TEMPLATE_KEY) || '[]'); } catch { return []; } }
+function storeTemplates(list) { try { localStorage.setItem(TEMPLATE_KEY, JSON.stringify(list)); return true; } catch { notice('Templates cannot be saved in this browser (storage blocked); use Export instead.', true); return false; } }
+function renderPresetList(selected = '') {
+  const t = loadTemplates(), esc = escapeHtml;
+  $('preset').innerHTML = `<option value="">— choose a preset or template —</option><optgroup label="Presets">${PRESETS.map(p => `<option value="p:${p.id}">${esc(p.name)}</option>`).join('')}</optgroup>`
+    + (t.length ? `<optgroup label="My templates">${t.map((x, i) => `<option value="t:${i}">${esc(x.name)}</option>`).join('')}</optgroup>` : '');
+  state.presetBase = selected || null; state.presetCustom = null;
+  $('preset').value = selected;
+  $('template-delete').disabled = !selected.startsWith('t:');
+  refreshPresetLabel();
+}
+function presetByValue(v) {
+  if (!v) return null;
+  if (v.startsWith('p:')) return PRESETS.find(p => p.id === v.slice(2));
+  if (v.startsWith('t:')) return loadTemplates()[Number(v.slice(2))];
+  return null;
+}
+/** The preset or template the settings came from (also while they have been changed since). */
+function chosenPreset() { return presetByValue(state.presetBase); }
+const SETTING_LABELS = { projection: 'projection', sigmaDeg: 'σ', truncate: 'kernel cut-off', planarFovDeg: 'field of view', windowSec: 'pooling window',
+  kernel: 'pooling weight', causal: 'past only', durationWeight: 'weight by duration', motionComp: 'motion compensation', lonOffsetDeg: 'rotation',
+  flipX: 'left–right flip', flipY: 'up–down flip', velocity: 'speed filter', coverageThreshold: 'coverage threshold' };
+/**
+ * Once any setting differs from the chosen preset, the menu shows "(custom <preset name>)" as a separate entry,
+ * so that choosing the preset itself again is a change of the menu and restores its values.
+ */
+function refreshPresetLabel() {
+  const sel = $('preset'), p = presetByValue(state.presetBase);
+  // motion compensation that waits for "Analyse motion" still counts as on
+  const diff = p ? presetDifferences(p.settings, { ...state.settings, motionComp: state.settings.motionComp || !!state.wantMotion }) : [];
+  const key = diff.length ? `${state.presetBase}|${diff.join()}` : null;
+  if (key === state.presetCustom) return;
+  state.presetCustom = key;
+  sel.querySelector('option[data-custom]')?.remove();
+  if (!diff.length) { sel.value = state.presetBase || ''; sel.title = ''; $('preset-changes').hidden = true; return; }
+  const o = document.createElement('option');
+  o.value = `c:${state.presetBase}`; o.dataset.custom = '1'; o.textContent = `(custom ${p.name})`;
+  sel.insertBefore(o, sel.children[1] || null);   // right after the placeholder, outside the groups
+  sel.value = o.value;
+  sel.title = `Changed from “${p.name}”: ${diff.map(k => SETTING_LABELS[k] || k).join(', ')}. Choose the preset again to restore its values.`;
+  $('preset-changes').hidden = false; $('preset-changes').textContent = `Changed: ${diff.map(k => SETTING_LABELS[k] || k).join(', ')}. Choose the preset again to restore its values.`;
+}
+$('preset').addEventListener('change', () => {
+  const v = $('preset').value;
+  if (v.startsWith('c:')) return;          // the "(custom …)" entry itself: nothing to apply
+  state.presetBase = v || null;
+  const p = chosenPreset();
+  $('template-delete').disabled = !v.startsWith('t:');
+  $('preset-about').textContent = p ? (p.about || 'Saved template.') + (p.settings.motionComp && !state.flow ? ' Motion compensation starts once “Analyse motion” has run.' : '') : '';
+  if (p) applySettings(p.settings);
+  refreshPresetLabel();
+});
+$('template-save').addEventListener('click', () => {
+  const name = prompt('Name of the template:', `σ ${state.settings.sigmaDeg}° · ±${state.settings.windowSec} s`);
+  if (!name) return;
+  const list = loadTemplates().filter(x => x.name !== name);
+  list.push({ name, settings: pickSettings({ ...state.settings, motionComp: state.settings.motionComp || !!state.wantMotion }) });
+  if (storeTemplates(list)) { renderPresetList(`t:${list.length - 1}`); notice(`Template “${name}” saved in this browser.`); }
+});
+$('template-delete').addEventListener('click', () => {
+  const v = state.presetBase || '';
+  if (!v.startsWith('t:')) return;
+  const list = loadTemplates(), [gone] = list.splice(Number(v.slice(2)), 1);
+  if (storeTemplates(list)) { renderPresetList(); $('preset-about').textContent = ''; notice(`Template “${gone?.name}” deleted.`); }
+});
+$('template-export').addEventListener('click', () => {
+  const p = chosenPreset(), name = (p && state.presetCustom ? `custom ${p.name}` : p?.name) || `OverGaze settings ${new Date().toISOString().slice(0, 10)}`;
+  const body = { overgaze_template: 1, name, settings: pickSettings({ ...state.settings, motionComp: state.settings.motionComp || !!state.wantMotion }) };
+  download(new Blob([JSON.stringify(body, null, 2)], { type: 'application/json' }), `${name.replace(/[^\w.-]+/g, '_').slice(0, 60)}.overgaze.json`);
+});
+$('template-import').addEventListener('click', () => $('template-input').click());
+$('template-input').addEventListener('change', async e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  try {
+    const { name, settings } = settingsFromJson(JSON.parse(await f.text()));
+    applySettings(settings);
+    const list = loadTemplates(), label = name || f.name.replace(/\.(overgaze\.)?json$/i, '');
+    list.push({ name: label, settings });
+    storeTemplates(list); renderPresetList(`t:${list.length - 1}`);
+    notice(`Settings imported from ${f.name} and kept as template “${label}”.`);
+  } catch (err) { notice(`Could not import ${f.name}: ${err.message}`, true); }
+});
+renderPresetList();
 
 $('play').addEventListener('click', togglePlay);
 $('prev-frame').addEventListener('click', () => stepFrames(-1));
@@ -1071,7 +1212,7 @@ function settingsJson(extra = {}) {
       projection: s.projection, sigma_deg: s.sigmaDeg, kernel_cutoff_sigma: s.truncate, planar_fov_deg: s.projection === 'planar' ? s.planarFovDeg : undefined,
       pooling_window_s: s.windowSec, pooling_weight: s.kernel, causal: s.causal, weight_by_duration: s.durationWeight,
       motion_compensation: !!(s.motionComp && state.flow), lon_offset_deg: s.lonOffsetDeg, flip_left_right: s.flipX, flip_up_down: s.flipY,
-      velocity_filter_deg_per_s: s.velocity || 0,
+      velocity_filter_deg_per_s: s.velocity || 0, coverage_threshold: s.coverageThreshold,
       frame_rule: 'frame k covers [k/fps, (k+1)/fps); a gaze sample or fixation counts if its time distance to that interval is <= pooling_window_s (0 = active during the frame).',
       gaussian: s.projection === 'erp' ? 'exp(-theta^2 / (2 sigma^2)), theta = great-circle angle to the gaze point, summed over points' : '2D Gaussian in the image plane, sigma_px = sigma_deg * width / planar_fov_deg'
     },
@@ -1306,6 +1447,22 @@ function updateButtons() {
 $('choose-video').addEventListener('click', () => $('video-input').click());
 $('empty-video').addEventListener('click', () => $('video-input').click());
 $('video-input').addEventListener('change', e => { if (e.target.files[0]) loadVideoFile(e.target.files[0]); e.target.value = ''; });
+$('choose-video-folder').addEventListener('click', () => $('video-folder-input').click());
+$('video-folder-input').addEventListener('change', e => {
+  const vids = [...e.target.files].filter(f => VIDEO_EXT.test(f.name) && !f.name.startsWith('.')).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  e.target.value = '';
+  if (!vids.length) { notice('No videos in that folder (.mp4, .webm, .mkv, .mov …).', true); return; }
+  state.library.videos = vids;
+  $('video-list').innerHTML = vids.map((f, i) => `<option value="${i}">${escapeHtml(f.name)}</option>`).join('');
+  $('video-list-row').hidden = false;
+  loadVideoFile(vids[0]);
+  notice(`${vids.length} videos in the folder. Pick one in the list (or with the arrows); its fixation files and reference are taken from what you load.`);
+});
+$('video-list').addEventListener('change', e => { const f = state.library.videos[Number(e.target.value)]; if (f) loadVideoFile(f); });
+for (const [id, d] of [['video-prev', -1], ['video-next', 1]]) $(id).addEventListener('click', () => {
+  const n = state.library.videos.length; if (!n) return;
+  const i = (Number($('video-list').value) + d + n) % n; $('video-list').value = String(i); $('video-list').dispatchEvent(new Event('change'));
+});
 $('load-video-url').addEventListener('click', () => { const u = $('video-url').value.trim(); if (u) loadVideoUrl(u); });
 $('video-url').addEventListener('keydown', e => { if (e.key === 'Enter') $('load-video-url').click(); });
 $('choose-gaze').addEventListener('click', () => $('gaze-input').click());

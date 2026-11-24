@@ -150,6 +150,19 @@ test('gaze files add up, observers can be removed, messages can be dismissed, a 
     await b.eval('overgaze.applySettings({ sigmaDeg: 5.6 }); document.querySelector("#ref-offset").value = "-45"; document.querySelector("#ref-offset").dispatchEvent(new Event("change")); document.querySelector("#video").currentTime = 1.51; 1');
     await b.waitFor('/CC (0\\.9|1\\.0)/.test(document.querySelector("#ro-ref").textContent)', 10000, 'high correlation with a matching reference').catch(async e => { console.log(await b.eval('document.querySelector("#ro-ref").textContent + " | " + document.querySelector("#ro-ref-detail").textContent + " | " + document.querySelector("#time-label").textContent')); throw e; });
 
+    // the two outlines: separate switches and colours
+    const count = '(rgb => { const c = document.querySelector("#heat-canvas"), d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] === rgb[0] && d[i + 1] === rgb[1] && d[i + 2] === rgb[2] && d[i + 3] === 255) n++; return n; })';
+    const setColor = (id, v) => b.eval(`document.querySelector('#${id}').value = '${v}'; document.querySelector('#${id}').dispatchEvent(new Event('input')); overgaze.render(); 1`);
+    await setColor('ref-outline-color', '#ff00ff'); await setColor('outline-color', '#00ffff');
+    assert.ok(await b.eval(`${count}([255, 0, 255])`) > 10, 'reference outline in its colour');
+    assert.ok(await b.eval(`${count}([0, 255, 255])`) > 10, 'our outline (switched on with the reference) in its colour');
+    await b.eval(`document.querySelector('#show-outline').click(); overgaze.render(); 1`);
+    assert.equal(await b.eval(`${count}([0, 255, 255])`), 0, 'our outline off');
+    assert.ok(await b.eval(`${count}([255, 0, 255])`) > 10, 'the reference outline stays');
+    await b.eval(`document.querySelector('#ref-outline').click(); document.querySelector('#show-outline').click(); overgaze.render(); 1`);
+    assert.equal(await b.eval(`${count}([255, 0, 255])`), 0, 'reference outline off');
+    assert.ok(await b.eval(`${count}([0, 255, 255])`) > 10, 'ours alone');
+
     await b.click('#view-360');
     await b.waitFor('!document.querySelector("#view360-canvas").hidden', 3000);
     const px = await b.eval('(()=>{const c=document.querySelector("#view360-canvas");const g=c.getContext("webgl2");const p=new Uint8Array(4);g.readPixels(c.width>>1,c.height>>1,1,1,g.RGBA,g.UNSIGNED_BYTE,p);return [c.width,p[3]]})()');
@@ -163,7 +176,7 @@ test('gaze files add up, observers can be removed, messages can be dismissed, a 
     assert.equal(await b.eval('overgaze.state.showGaze'), false);
     await b.click('#clear-gaze');
     assert.equal(await b.eval('overgaze.state.gaze'), null);
-    assert.deepEqual(b.logs.filter(l => !/WebGL|GPU stall|swiftshader/i.test(l)), []);
+    assert.deepEqual(b.logs.filter(l => !/WebGL|GPU stall|swiftshader|willReadFrequently/i.test(l)), []);   // the last one comes from the test reading pixels
   } finally { b.close(); server.close(); }
 });
 
@@ -246,5 +259,60 @@ test('the unfolded 360° views (cubemap, equi-angular cubemap, cylinder) match f
       const c = s / Math.sqrt(sa * sb);
       assert.ok(c > min, `${mode}: correlation with ffmpeg ${c.toFixed(3)}`);   // EAC lower: ffmpeg adds 2 px of padding
     }
+  } finally { b.close(); server.close(); }
+});
+
+test('a folder of videos: fixations and references follow the chosen video; settings export and import', opts, async () => {
+  const { server, url } = await serve(), b = await launch();
+  const dir = mkdtempSync(join(tmpdir(), 'overgaze-lib-'));
+  try {
+    for (const d of ['videos', 'gaze', 'refs']) mkdirSync(join(dir, d));
+    for (const v of ['clipA', 'clipB']) copyFileSync(join(ROOT, 'sample', 'sample_erp.mp4'), join(dir, 'videos', `${v}.mp4`));
+    const csv = 'user,start_time,duration,longitude,latitude\n';
+    writeFileSync(join(dir, 'gaze', 'clipA_fix.csv'), csv + '1,1.0,2.0,0.5,0.5\n');
+    writeFileSync(join(dir, 'gaze', 'clipB_fix.csv'), csv + '1,1.0,2.0,0.25,0.5\n2,1.0,2.0,0.25,0.5\n');
+    // one static reference image per clip
+    const { encodeGrayPng } = await import('../src/export.js');
+    const png = Buffer.from(await encodeGrayPng(Float32Array.from({ length: 64 * 32 }, (_, i) => (i % 64) / 63), 64, 32, 8));
+    writeFileSync(join(dir, 'refs', 'clipA_saliency.png'), png); writeFileSync(join(dir, 'refs', 'clipB_saliency.png'), png);
+
+    await b.goto(url);
+    await b.setFiles('#video-folder-input', [join(dir, 'videos')]);
+    await b.waitFor('overgaze.state.library.videos.length === 2 && overgaze.state.video.name === "clipA.mp4"', 20000, 'video folder');
+    await b.setFiles('#gaze-folder-input', [join(dir, 'gaze')]);
+    await b.waitFor('overgaze.state.gaze && overgaze.state.files.length === 1', 10000, 'clipA gaze');
+    await b.setFiles('#ref-folder-input', [join(dir, 'refs')]);
+    await b.waitFor('overgaze.state.ref && overgaze.state.ref.name === "clipA_saliency.png"', 10000, 'clipA reference').catch(async e => { console.log(await b.eval('document.querySelector("#notice-text").textContent + " / " + overgaze.state.library.refs.length + " / " + (overgaze.state.ref && overgaze.state.ref.name)'), b.logs); throw e; });
+    await b.click('#video-next');
+    await b.waitFor('overgaze.state.video.name === "clipB.mp4" && overgaze.state.files[0]?.name === "clipB_fix.csv" && overgaze.state.ref?.name === "clipB_saliency.png"', 20000, 'clipB tied');
+    assert.equal(await b.eval('overgaze.state.gaze.observers.length'), 2);
+
+    // presets and settings files
+    await b.eval(`document.querySelector('#preset').value = 'p:salient360-he'; document.querySelector('#preset').dispatchEvent(new Event('change')); 1`);
+    assert.equal(await b.eval('overgaze.state.settings.sigmaDeg'), 2);
+    // a changed setting turns the menu into "(custom …)"; choosing the preset again restores its values
+    const menuText = 'document.querySelector("#preset").selectedOptions[0].textContent';
+    await b.eval(`document.querySelector('#sigma-num').value = '3.5'; document.querySelector('#sigma-num').dispatchEvent(new Event('change')); 1`);
+    assert.equal(await b.eval('overgaze.state.settings.sigmaDeg'), 3.5);
+    assert.equal(await b.eval(menuText), '(custom Salient360: head + eye maps (σ 2°, per frame))');
+    assert.match(await b.eval('document.querySelector("#preset").title'), /σ/);
+    await b.eval(`document.querySelector('#preset').value = 'p:salient360-he'; document.querySelector('#preset').dispatchEvent(new Event('change')); 1`);
+    assert.equal(await b.eval('overgaze.state.settings.sigmaDeg'), 2, 'preset values restored');
+    assert.equal(await b.eval(menuText), 'Salient360: head + eye maps (σ 2°, per frame)');
+    assert.equal(await b.eval('document.querySelectorAll("#preset option[data-custom]").length'), 0);
+    // the motion-compensated preset is not "custom" just because the motion has not been analysed yet
+    await b.eval(`document.querySelector('#preset').value = 'p:video-sal-mc3'; document.querySelector('#preset').dispatchEvent(new Event('change')); 1`);
+    assert.equal(await b.eval(menuText), 'Video-saliency training maps “mc3” (σ 3°, ±1 s, motion comp.)');
+    await b.eval(`document.querySelector('#preset').value = 'p:salient360-he'; document.querySelector('#preset').dispatchEvent(new Event('change')); 1`);
+    await b.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: dir });
+    await b.eval('overgaze.applySettings({ sigmaDeg: 4.5, windowSec: 0.7 }); 1');
+    await b.click('#template-export');
+    for (let i = 0; i < 50 && !readdirSync(dir).some(f => f.endsWith('.overgaze.json')); i++) await new Promise(r => setTimeout(r, 100));
+    const saved = readdirSync(dir).find(f => f.endsWith('.overgaze.json'));
+    assert.ok(saved, 'settings file downloaded');
+    await b.eval('overgaze.applySettings({ sigmaDeg: 2, windowSec: 0 }); 1');
+    await b.setFiles('#template-input', [join(dir, saved)]);
+    await b.waitFor('overgaze.state.settings.sigmaDeg === 4.5 && overgaze.state.settings.windowSec === 0.7', 5000, 'settings imported');
+    assert.match(await b.eval('document.querySelector("#preset").selectedOptions[0].parentElement.label'), /My templates/);
   } finally { b.close(); server.close(); }
 });
