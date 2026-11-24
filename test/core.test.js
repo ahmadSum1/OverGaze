@@ -336,3 +336,65 @@ test('outline lines: a closed border between pixel centres, across the 360° sea
   assert.ok(contourSegments(edge, W, H, 0.5).length > 0, 'an area filling the frame still gets a border');
   assert.equal(contourSegments(new Float32Array(W * H), W, H, 0.5).length, 0);
 });
+
+test('drop rules: numbers and text, "and" parts, each row counted against the first rule that drops it', async () => {
+  const { cellMatches, minDurationFilter, ruleText } = await import('../src/gaze.js');
+  assert.ok(cellMatches('0.3', '<', '0.5') && !cellMatches('0.5', '<', '0.5') && cellMatches('2', '>', '1.5'));
+  assert.ok(cellMatches('0', '=', '0.0'), 'numbers compared as numbers');
+  assert.ok(cellMatches(' Lost ', '=', 'lost') && !cellMatches('lost', '<', 'x'), 'text only with =');
+  const t = parseTable('user,t,dur,x,y,conf\n1,0.1,0.2,0.5,0.5,0.9\n1,0.4,0.05,0,0,0.9\n2,0.2,0.3,0,0.4,0.2\n2,0.6,0.3,0.3,0.3,0.95\n2,0.9,0.08,0.6,0.6,0.99\n', 'a.csv');
+  const m = { ...detectMapping(t, { duration: 2 }), time: 't', timeUnit: 's', duration: 'dur', durationUnit: 's', end: '', x: 'x', y: 'y', coord: 'normalized', xLeft: 0, xRight: 1, yTop: 0, yBottom: 1, observerFrom: 'column', observer: 'user' };
+  const rules = [{ clauses: [{ column: 'x', op: '=', value: '0' }, { column: 'y', op: '=', value: '0' }] }, { clauses: [{ column: 'conf', op: '<', value: '0.5' }] }, { clauses: [{ column: 'nope', op: '=', value: '1' }] }];
+  const g = buildGaze([{ table: t, name: 'a.csv' }], m, { rules });
+  assert.equal(g.n, 3);
+  assert.deepEqual(g.ruleRemoved, [1, 1, 0], 'x = 0 alone (row 3) is kept by the first rule and dropped by the confidence rule; a missing column drops nothing');
+  assert.equal(ruleText(rules[0]), 'x = 0 and y = 0');
+  const incomplete = buildGaze([{ table: t, name: 'a.csv' }], m, { rules: [{ clauses: [{ column: 'conf', op: '<', value: '' }] }] });
+  assert.equal(incomplete.n, 5, 'a rule without a value does nothing yet');
+  // minimum fixation duration: only with durations
+  const d = minDurationFilter(g, 100);
+  assert.equal(d.n, 2); assert.equal(d.durationRemoved, 1);
+  const samples = packRecords([[0, 0, 0, 0, 0, 0, 1], [0.1, 0.1, 0, 0, 0, 0, 1]], ['o'], ['c']);
+  assert.equal(minDurationFilter(samples, 100), samples, 'gaze samples without durations are left alone');
+  assert.throws(() => minDurationFilter(g, 10000), /No fixation/);
+});
+
+test('observer agreement: leave-one-out correlation flags the observer who looks elsewhere, within each condition', async () => {
+  const { agreementScorer, correlation, lowScores } = await import('../src/agreement.js');
+  const w = new Float64Array(4).fill(1);
+  close(correlation(Float32Array.of(1, 0, 0, 1), Float32Array.of(2, 0, 0, 2)), 1, 1e-9);
+  close(correlation(Float32Array.of(1, 0, 0, 0), Float32Array.of(1, 0, 0, 1), w, true), -1 / 3, 1e-9, 'leave-one-out: compared with the total minus itself');
+  assert.ok(Number.isNaN(correlation(Float32Array.of(1, 0, 0, 0), Float32Array.of(1, 0, 0, 0), w, true)), 'nobody else: no score');
+  assert.equal(lowScores([0.8, 0.7, 0.75]).set.size, 0, 'too few to judge');
+  assert.deepEqual([...lowScores([0.8, 0.78, 0.82, 0.79, 0.81, 0.1]).set], [5]);
+  // six observers follow a target drifting east; observer 5 looks at the opposite side; a second condition copies the first
+  const recs = [];
+  for (let k = 0; k < 40; k++) {
+    const t = k * 0.1, lon = (-40 + 2 * k) * DEG;
+    for (let o = 0; o < 6; o++) {
+      const jitter = ((o * 7) % 5 - 2) * 0.8 * DEG;
+      recs.push([t, t + 0.1, o === 5 ? lon + Math.PI * 0.9 : lon + jitter, jitter, o, 0, 1]);
+      recs.push([t, t + 0.1, lon - jitter, -jitter, 6 + o, 1, 1]);
+    }
+  }
+  const g = packRecords(recs, Array.from({ length: 12 }, (_, i) => `o${i}`), ['L', 'R']);
+  const sc = agreementScorer(g, { ...DEFAULTS, sigmaDeg: 4, windowSec: 0 }, { fps: 10, tol: 0.05 });
+  for (let k = 0; k < 40; k++) sc.add((k + 0.5) / 10);
+  const r = sc.result();
+  assert.deepEqual(r.conditionOf, [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1]);
+  assert.ok(r.scores[5] < 0.2 && r.scores[0] > 0.5, `the one looking elsewhere: ${r.scores.map(v => v.toFixed(2))}`);
+  assert.ok(r.scores.slice(6).every(v => v > 0.5), 'the other condition is scored on its own and agrees');
+  assert.deepEqual([...r.low.set], [5]);
+  assert.equal(r.frames[0], 40);
+});
+
+test('settings files carry the minimum duration and the drop rules', async () => {
+  const { settingsFromJson, PRESETS } = await import('../src/presets.js');
+  const rules = [{ all_of: [{ column: 'x', op: '=', value: '0' }, { column: 'y', op: '=', value: '0' }], rows_removed: 3 }];
+  const r = settingsFromJson({ saliency: { sigma_deg: 3, velocity_filter_deg_per_s: 0 }, gaze_processing: { min_fixation_duration_ms: 100, speed_filter_deg_per_s: 75, drop_row_rules: rules } });
+  assert.equal(r.settings.minDurationMs, 100); assert.equal(r.settings.velocity, 75);
+  assert.deepEqual(r.rowRules, [{ clauses: [{ column: 'x', op: '=', value: '0' }, { column: 'y', op: '=', value: '0' }] }]);
+  const tpl = settingsFromJson({ overgaze_template: 1, name: 'n', settings: { minDurationMs: 80 }, row_rules: [{ clauses: [{ column: 'conf', op: '<', value: '0.5' }] }] });
+  assert.equal(tpl.settings.minDurationMs, 80); assert.equal(tpl.rowRules[0].clauses[0].column, 'conf');
+  assert.ok(PRESETS.every(p => p.settings.minDurationMs === 0), 'presets switch the minimum duration off');
+});

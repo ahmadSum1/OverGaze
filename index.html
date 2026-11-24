@@ -98,7 +98,8 @@
       <section id="groups-section" class="side-section" hidden>
         <div class="section-title"><span class="section-icon">☷</span> Observers &amp; conditions <span class="section-number">D</span></div>
         <div id="condition-list" class="chip-list"></div>
-        <div class="list-head"><span id="observer-count">0 observers</span><span><button id="obs-all" class="link-button" type="button">all</button> · <button id="obs-none" class="link-button" type="button">none</button></span></div>
+        <div class="list-head"><span id="observer-count">0 observers</span><span><button id="obs-sort" class="link-button" type="button" hidden title="Order the observers by their agreement score, lowest first">sort by agreement</button><span id="obs-sort-sep" hidden> · </span><button id="obs-all" class="link-button" type="button">all</button> · <button id="obs-none" class="link-button" type="button">none</button></span></div>
+        <p id="agreement-status" class="hint"></p>
         <div id="observer-list" class="observer-list"></div>
       </section>
       <section id="reference-section" class="side-section">
@@ -221,6 +222,11 @@
       <div class="settings-section"><div class="section-title"><span class="section-icon">⟲</span> Gaze processing <span class="section-number">04</span></div>
         <div class="setting-row"><label for="vel">Drop samples faster than (°/s)</label><input id="vel" class="num" type="number" min="0" max="2000" step="5" value="0"></div>
         <p class="hint">0 = off. For raw gaze samples (not fixations), e.g. 75°/s.</p>
+        <div class="setting-row"><label for="min-dur">Minimum fixation duration (ms)</label><input id="min-dur" class="num" type="number" min="0" max="5000" step="10" value="0"></div>
+        <p id="min-dur-hint" class="hint">0 = off. Drops fixations shorter than this, e.g. 100 ms.</p>
+        <div class="setting-row"><label>Drop rows where</label><button id="rule-add" class="link-button" type="button" disabled>＋ add rule</button></div>
+        <div id="rule-list" class="rule-list"></div>
+        <p class="hint">For a confidence column (e.g. confidence &lt; 0.5) or a value the eye tracker writes when it loses the eye. A row is dropped when every part of one rule holds, so a lost-eye 0,0 is “x = 0 and y = 0”. The gaze summary says how many rows each rule removed.</p>
         <div class="setting-row"><label for="lon-offset">Rotate longitude (°)</label><input id="lon-offset-num" class="num" type="number" min="-180" max="180" step="1" value="0"></div>
         <input id="lon-offset" type="range" min="-180" max="180" step="1" value="0">
         <label class="view-switch"><span>Flip left–right</span><input id="flip-x" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>

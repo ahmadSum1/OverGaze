@@ -266,9 +266,32 @@ export function toSeconds(value, unit, fps = 30) {
   return value * (UNIT[unit] ?? 1);
 }
 
+/** Comparisons a drop rule can use. */
+export const RULE_OPS = ['<', '>', '='];
+
+/**
+ * Does one table cell meet a rule part { column, op, value }? Numbers are compared as numbers; "=" also matches
+ * text (ignoring case and surrounding spaces), so a status column or "nan" can be matched too.
+ */
+export function cellMatches(cell, op, value) {
+  const a = String(cell ?? '').trim(), b = String(value ?? '').trim();
+  const num = v => v !== '' && Number.isFinite(Number(v));
+  if (num(a) && num(b)) {
+    const x = Number(a), y = Number(b);
+    return op === '<' ? x < y : op === '>' ? x > y : op === '=' ? x === y : false;
+  }
+  return op === '=' && a.toLowerCase() === b.toLowerCase();
+}
+
+/** "x = 0 and y = 0": a rule written out in words. */
+export function ruleText(rule) { return (rule.clauses || []).map(c => `${c.column} ${c.op} ${c.value}`).join(' and '); }
+
 /**
  * Convert parsed files into one time-sorted gaze set.
- * files: [{ table, name, folder }]; mapping: see detectMapping; context: { fps, width, height }.
+ * files: [{ table, name, folder }]; mapping: see detectMapping; context: { fps, width, height, rules }.
+ * rules: [{ clauses: [{ column, op, value }, …] }]: a row is dropped when every part of one rule holds; it is
+ * counted against the first rule that drops it (g.ruleRemoved[i]). Rows without a valid time or position are
+ * skipped before the rules (g.skipped).
  */
 export function buildGaze(files, mapping, context = {}) {
   const fps = context.fps || 30;
@@ -281,6 +304,8 @@ export function buildGaze(files, mapping, context = {}) {
   };
   const records = [];
   let skipped = 0;
+  const rules = (context.rules || []).filter(r => r.clauses?.length && r.clauses.every(c => c.column && RULE_OPS.includes(c.op) && String(c.value ?? '').trim() !== ''));
+  const ruleRemoved = new Array(rules.length).fill(0);
   for (const file of files) {
     const cols = file.table.columns;
     const col = name => (name ? cols.indexOf(name) : -1);
@@ -291,6 +316,8 @@ export function buildGaze(files, mapping, context = {}) {
     if ((it < 0 && mapping.time !== FILE_TIME) || ix < 0 || iy < 0) throw new Error(`${file.name}: time, x and y columns are required (missing ${[it < 0 && 'time', ix < 0 && 'x', iy < 0 && 'y'].filter(Boolean).join(', ')}).`);
     if (mapping.coord === 'vector' && iz < 0) throw new Error(`${file.name}: 3D direction needs a z column.`);
     const stem = file.label || file.name.replace(/\.[^.]+$/, '');
+    // a rule part on a column this file does not have never holds, so that rule keeps every row of this file
+    const ruleCols = rules.map(r => r.clauses.map(c => cols.indexOf(c.column)));
     let run = 0, prevCounter = Infinity;
     for (const row of file.table.rows) {
       if (mapping.observerFrom === 'restart' && io >= 0) {   // a counter column that starts again for each observer
@@ -311,6 +338,8 @@ export function buildGaze(files, mapping, context = {}) {
         lonlat = vectorToLonLat(x, y, z);
       } else lonlat = toLonLat(x, y, mapping);
       if (!lonlat) { skipped++; continue; }
+      const hit = rules.findIndex((r, k) => r.clauses.every((c, j) => ruleCols[k][j] >= 0 && cellMatches(row[ruleCols[k][j]], c.op, c.value)));
+      if (hit >= 0) { ruleRemoved[hit]++; continue; }
       const observerKey = mapping.observerFrom === 'column' && io >= 0 ? String(row[io]) : mapping.observerFrom === 'file' ? stem
         : mapping.observerFrom === 'restart' ? `${stem}#${String(run + 1).padStart(2, '0')}`
         : mapping.observerFrom === 'folder' ? (file.folder || stem) : 'all';
@@ -325,8 +354,10 @@ export function buildGaze(files, mapping, context = {}) {
       records.push([t0, t1, lonlat[0], lonlat[1], observer, condition, weight]);
     }
   }
-  if (!records.length) throw new Error('No valid gaze rows were found with this column mapping.');
-  return packRecords(records, observers, conditions, skipped);
+  if (!records.length) throw new Error(ruleRemoved.some(Boolean) ? 'The drop rules removed every gaze row.' : 'No valid gaze rows were found with this column mapping.');
+  const g = packRecords(records, observers, conditions, skipped);
+  g.ruleRemoved = ruleRemoved; g.rules = rules;
+  return g;
 }
 
 /** A duration in seconds (frame units are plain frame counts here). */
@@ -408,6 +439,20 @@ export function velocityFilter(g, maxDegPerSec) {
   for (let i = 0; i < g.n; i++) if (keep[i]) records.push([g.t0[i], g.t1[i], g.lon[i], g.lat[i], g.obs[i], g.cond[i], g.w[i]]);
   const out = packRecords(records, g.observers, g.conditions, g.skipped);
   out.filtered = g.n - kept;
+  return out;
+}
+
+/**
+ * Drop fixations shorter than minMs milliseconds. Only for gaze sets with durations (fixation files); returns the
+ * same set when off or when there are no durations. out.durationRemoved counts the dropped fixations.
+ */
+export function minDurationFilter(g, minMs) {
+  if (!minMs || minMs <= 0 || !g.hasDuration) return g;
+  const min = minMs / 1000 - 1e-9, records = [];
+  for (let i = 0; i < g.n; i++) if (g.t1[i] - g.t0[i] >= min) records.push([g.t0[i], g.t1[i], g.lon[i], g.lat[i], g.obs[i], g.cond[i], g.w[i]]);
+  if (!records.length) throw new Error(`No fixation lasts ${minMs} ms or more.`);
+  const out = packRecords(records, g.observers, g.conditions, g.skipped);
+  out.durationRemoved = g.n - records.length;
   return out;
 }
 
