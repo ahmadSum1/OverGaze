@@ -23,7 +23,7 @@ const state = {
   flow: null, flowInfo: null, analysing: null, exporting: null, recording: null,
   work: {}, last: null, renderQueued: false, projectionTouched: false, density: null,
   library: { videos: [], gaze: [], refs: [] }, tiedTo: null,
-  ref: null, refShow: { heat: false, outline: true, outlineColor: '#ffffff' }, showGaze: true, removedObservers: new Set(), view: null,
+  ref: null, refShow: { heat: false, outline: true, outlineColor: '#ffffff' }, showGaze: true, showRef: true, removedObservers: new Set(), view: null,
   layout: 'erp', layoutTouched: false, layoutOpts: { ...DEFAULT_OPTIONS }, converter: null
 };
 
@@ -345,7 +345,7 @@ function render() {
     $('readout-badge').hidden = false;
     $('readout-badge').textContent = `σ ${state.settings.sigmaDeg}° · ±${state.settings.windowSec} s${state.settings.causal ? ' past' : ''}${state.settings.motionComp && state.flow ? ' · motion-comp.' : ''}`;
   }
-  const wrapX = state.settings.projection === 'erp', refOutline = !!(state.ref && state.refShow.outline);
+  const wrapX = state.settings.projection === 'erp', refOutline = !!(state.ref && state.showRef && state.refShow.outline);
   const rgb = hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
   if (state.showGaze && state.display.mode !== 'off' && result) colorize(result.map, img.data, colorOpts);
   // the two outlines are independent: each has its own switch and colour
@@ -354,7 +354,7 @@ function render() {
   hctx.putImageData(img, 0, 0);
   // the reference heatmap has its own layer (under ours) and its own colours
   const rctx = refCanvas.getContext('2d');
-  if (state.ref && state.refShow.heat && ref) {
+  if (state.ref && state.showRef && state.refShow.heat && ref) {
     if (refCanvas.width !== W || refCanvas.height !== H) { refCanvas.width = W; refCanvas.height = H; }
     const rimg = rctx.createImageData(W, H);
     colorize(normalised(ref.map), rimg.data, { ...colorOpts, colormap: state.refColormap || 'ice', mode: state.display.mode === 'off' || state.display.mode === 'spotlight' ? 'heat' : state.display.mode });
@@ -461,7 +461,7 @@ async function loadReference(files) {
     state.ref = R;
     $('ref-name').textContent = R.name; $('ref-name').title = R.name;
     $('ref-size').textContent = `${R.N} × ${R.W} × ${R.H}${R.kind === 'bin' ? ' float32' : ''}`;
-    $('ref-offset').value = String(R.offset); $('ref-scale').value = '1'; $('clear-ref').disabled = false; syncLayerChips();
+    $('ref-offset').value = String(R.offset); $('ref-scale').value = '1'; $('clear-ref').disabled = false; state.showRef = true; syncLayerChips();
     const vFrames = video.duration ? Math.round(video.duration * state.fps) : 0;
     const msgs = [`Reference loaded: ${R.name}.`];
     if (R.kind === 'bin' && !state.projectionTouched && state.settings.projection !== 'erp') { state.settings.projection = 'erp'; $('projection').value = 'erp'; $('fov-row').hidden = true; updateSubtitle(); msgs.push('Projection set to 360° (Salient360 maps are equirectangular).'); }
@@ -549,21 +549,26 @@ $('clear-ref').addEventListener('click', () => { state.ref = null; state.library
 $('ref-hold').addEventListener('change', e => { if (state.ref) state.ref.hold = e.target.checked; if (!e.target.checked) resumeAfterReference(); });
 $('ref-offset').addEventListener('change', e => { if (state.ref) { state.ref.offset = Math.round(Number(e.target.value) || 0); requestRender(); } });
 $('ref-scale').addEventListener('change', e => { if (state.ref) { state.ref.scale = Math.max(0.001, Number(e.target.value) || 1); requestRender(); } });
-$('ref-heat').addEventListener('change', e => { state.refShow.heat = e.target.checked; syncLayerChips(); requestRender(); });
-$('ref-outline').addEventListener('change', e => { state.refShow.outline = e.target.checked; requestRender(); });
+// switching one of a side's layers on also shows that side, so the switch does what it says
+$('ref-heat').addEventListener('change', e => { state.refShow.heat = e.target.checked; if (e.target.checked) state.showRef = true; syncLayerChips(); requestRender(); });
+$('ref-outline').addEventListener('change', e => { state.refShow.outline = e.target.checked; if (e.target.checked) state.showRef = true; syncLayerChips(); requestRender(); });
 $('ref-outline-color').addEventListener('input', e => { state.refShow.outlineColor = e.target.value; requestRender(); });
 $('outline-color').addEventListener('input', e => { state.display.outlineColor = e.target.value; requestRender(); });
 $('ref-colormap').innerHTML = COLORMAPS.map(c => `<option value="${c}">${c[0].toUpperCase() + c.slice(1)}</option>`).join('');
 $('ref-colormap').value = 'ice';
 $('ref-colormap').addEventListener('change', e => { state.refColormap = e.target.value; requestRender(); });
-/** Toolbar chips: our gaze layer (heatmap, points, outline) and the reference heatmap, on and off. */
+/**
+ * Toolbar buttons: one per side. "Gaze" hides or shows everything of ours (heatmap, gaze points, outline),
+ * "Reference" everything of the reference (heatmap and outline). The switches in the panels say which layers a
+ * side has; the button hides the whole side without touching them.
+ */
 function syncLayerChips() {
-  $('layer-gaze').classList.toggle('active', state.showGaze); $('layer-gaze').setAttribute('aria-pressed', String(state.showGaze));
-  $('layer-ref').classList.toggle('active', state.refShow.heat); $('layer-ref').setAttribute('aria-pressed', String(state.refShow.heat));
-  $('layer-ref').disabled = !state.ref; $('ref-heat').checked = state.refShow.heat;
+  const on = (id, v) => { $(id).classList.toggle('active', v); $(id).setAttribute('aria-pressed', String(v)); };
+  on('layer-gaze', state.showGaze); on('layer-ref', !!state.ref && state.showRef);
+  $('layer-ref').disabled = !state.ref;
 }
 $('layer-gaze').addEventListener('click', () => { state.showGaze = !state.showGaze; syncLayerChips(); requestRender(); });
-$('layer-ref').addEventListener('click', () => { state.refShow.heat = !state.refShow.heat; syncLayerChips(); requestRender(); });
+$('layer-ref').addEventListener('click', () => { state.showRef = !state.showRef; syncLayerChips(); requestRender(); });
 $('cov-thr').addEventListener('change', e => {
   state.settings.coverageThreshold = Math.min(0.99, Math.max(0.001, Number(e.target.value) || 0.1));
   $('ro-coverage-label').textContent = `COVERAGE ≥ ${state.settings.coverageThreshold} MAX`;
@@ -1036,8 +1041,8 @@ $('color-ramp').style.background = cssGradient('jet');
 $('opacity').addEventListener('input', e => { state.display.opacity = Number(e.target.value) / 100; $('opacity-value').textContent = `${e.target.value}%`; requestRender(); });
 $('gamma').addEventListener('input', e => { state.display.gamma = Number(e.target.value); $('gamma-value').textContent = Number(e.target.value).toFixed(2); requestRender(); });
 $('map-width').addEventListener('change', e => { state.display.mapWidth = Number(e.target.value); requestRender(); });
-$('show-outline').addEventListener('change', e => { state.display.outline = e.target.checked; state.display.outlineTouched = true; requestRender(); });
-$('show-points').addEventListener('change', e => { state.display.showPoints = e.target.checked; requestRender(); });
+$('show-outline').addEventListener('change', e => { state.display.outline = e.target.checked; state.display.outlineTouched = true; if (e.target.checked) state.showGaze = true; syncLayerChips(); requestRender(); });
+$('show-points').addEventListener('change', e => { state.display.showPoints = e.target.checked; if (e.target.checked) state.showGaze = true; syncLayerChips(); requestRender(); });
 $('speed').addEventListener('change', e => { video.playbackRate = Number(e.target.value); });
 function onSettings() { updateExportSummary(); requestRender(); }
 
@@ -1253,7 +1258,7 @@ function debugReport() {
   if (state.removedObservers?.size) L.push(`  removed observers: ${[...state.removedObservers].join(', ')}`);
   L.push('', 'REFERENCE');
   if (!state.ref) L.push('  none');
-  else L.push(`  ${state.ref.name}: ${state.ref.kind}, ${state.ref.N} frame(s) of ${state.ref.W} × ${state.ref.H}, offset ${state.ref.offset}, rate ${state.ref.scale}, showing ${[state.refShow.heat && 'heatmap', state.refShow.outline && 'outline'].filter(Boolean).join(' + ') || 'numbers only'}`,
+  else L.push(`  ${state.ref.name}: ${state.ref.kind}, ${state.ref.N} frame(s) of ${state.ref.W} × ${state.ref.H}, offset ${state.ref.offset}, rate ${state.ref.scale}, showing ${(state.showRef && [state.refShow.heat && 'heatmap', state.refShow.outline && 'outline'].filter(Boolean).join(' + ')) || 'numbers only'}`,
     `  ${$('ro-ref').textContent} — ${$('ro-ref-detail').textContent}${state.ref.error ? ' — ERROR ' + state.ref.error : ''}`);
   L.push('', '360° VIEW', state.view ? `  on, yaw ${fmt(state.view.yaw, 1)}°, pitch ${fmt(state.view.pitch, 1)}°, field of view ${fmt(state.view.fov, 0)}°` : '  off');
   L.push('', 'SETTINGS', '  ' + JSON.stringify(state.settings));
@@ -1385,7 +1390,7 @@ function compositeCanvas(maxWidth = 3840) {
 function drawComposite(c) {
   const g = c.getContext('2d');
   g.drawImage(converting() ? $('erp-canvas') : video, 0, 0, c.width, c.height);
-  if (state.ref && state.refShow.heat) g.drawImage(refCanvas, 0, 0, c.width, c.height);
+  if (state.ref && state.showRef && state.refShow.heat) g.drawImage(refCanvas, 0, 0, c.width, c.height);
   { g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high'; g.drawImage(heatCanvas, 0, 0, c.width, c.height); }
   g.drawImage(marksCanvas, 0, 0, c.width, c.height);
 }
