@@ -181,7 +181,10 @@ The readout under the video shows the points in the window, the observers that c
 - **Grow while the eye stays in place**: a dot gains its own size every 0.5 s its eye stays put, up to the cap (× the dot size). Fixation files: by the time into the fixation. Raw gaze samples: while they stay within 1.5° of where the eye arrived.
 - **Join each person's two eyes**: a thin dashed line between a person's left- and right-eye dot in the current frame (needs paired eyes).
 
-These are saved in settings.json under `display.gaze_points` and read back from a settings file.
+- **With pooling on** (a window above 0): dots of the current frame are solid with a white edge; dots from earlier moments are rings and from later moments solid but faint, both fading from 0.85 to 0.15 opacity towards the edge of the window. With motion compensation, **a line from where a point was recorded to where the motion moved it** (can be switched off).
+- **Legend on the video** (top left; can be switched off): what the shapes and styles mean for the current settings. It is not part of snapshots or recordings.
+
+With 100+ observers the current-frame dots stay on top, nearer moments over farther ones, so the busy pooled cloud does not hide the current gaze. These are saved in settings.json under `display.gaze_points` and read back from a settings file.
 
 ### Motion compensation
 

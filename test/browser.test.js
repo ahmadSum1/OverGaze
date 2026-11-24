@@ -575,3 +575,33 @@ test('one colour per person: both eyes share it, the left eye is a circle and th
     assert.deepEqual(b.logs, []);
   } finally { b.close(); server.close(); }
 });
+
+test('with pooling on, points of the current frame, earlier and later moments are drawn apart; motion lines and the legend follow the settings', opts, async () => {
+  const { server, url } = await serve(), b = await launch();
+  try {
+    await b.goto(url + '?sample=eyes');
+    await b.waitFor('!!overgaze.state.people && document.querySelector("#video").readyState >= 2', 20000, 'sample');
+    const legend = () => b.eval('[...document.querySelectorAll("#points-legend > div")].map(d => d.textContent)');
+    await b.eval(`document.querySelector('#video').currentTime = 4; 1`); await new Promise(r => setTimeout(r, 1000));
+    assert.deepEqual(await legend(), ['gaze: circle left eye, square right eye, colour = person']);
+    await b.eval(`overgaze.applySettings({ windowSec: 1, kernel: 'gaussian' }); 1`); await new Promise(r => setTimeout(r, 600));
+    assert.deepEqual(await legend(), ['this frame: circle left eye, square right eye, colour = person', 'earlier (fainter the further back)', 'later (fainter the further ahead)']);
+    // count the line segments drawn on the points canvas
+    await b.eval(`(() => { window.__lines = 0; const P = CanvasRenderingContext2D.prototype, lt = P.lineTo; P.lineTo = function (...a) { if (this.canvas.id === 'marks-canvas') window.__lines++; return lt.apply(this, a); }; return 1; })()`);
+    await b.eval(`(e => { e.value = 'seek'; e.dispatchEvent(new Event('change')); return 1; })(document.querySelector('#flow-method'))`);
+    await b.click('#analyse');
+    await b.waitFor('!!overgaze.state.flow && !overgaze.state.analysing', 120000, 'motion');
+    await b.eval(`overgaze.applySettings({ motionComp: true }); window.__lines = 0; document.querySelector('#video').currentTime = 4.01; 1`); await new Promise(r => setTimeout(r, 800));
+    const withLines = await b.eval('window.__lines');
+    assert.ok(withLines > 50, `lines from where points were recorded to where motion moved them (${withLines})`);
+    assert.ok((await legend()).includes('moved by motion from where it was recorded'));
+    await b.eval(`(e => { e.checked = false; e.dispatchEvent(new Event('change')); return 1; })(document.querySelector('#point-motion-lines'))`);
+    await b.eval(`window.__lines = 0; document.querySelector('#video').currentTime = 4.02; 1`); await new Promise(r => setTimeout(r, 800));
+    assert.equal(await b.eval('window.__lines'), 0, 'no motion lines when switched off');
+    await b.eval(`(e => { e.checked = false; e.dispatchEvent(new Event('change')); return 1; })(document.querySelector('#point-legend'))`);
+    assert.equal(await b.eval('document.querySelector("#points-legend").hidden'), true);
+    const gp = await b.eval('overgaze.settingsJson().display.gaze_points');
+    assert.equal(gp.motion_lines, false); assert.equal(gp.legend, false); assert.match(gp.time_styles, /earlier = rings, later = solid/);
+    assert.deepEqual(b.logs, []);
+  } finally { b.close(); server.close(); }
+});
