@@ -8,6 +8,7 @@ import { fpsFromDeltas } from './timing.js';
 import { fpsFromMp4File } from './mp4fps.js';
 import { pairEyes, withoutEye } from './pairs.js';
 import { collectMarks } from './marks.js';
+import { originOf, originalTime } from './origin.js';
 import { compareMaps, openReference, referencesFor, resample } from './reference.js';
 import { PRESETS, pickSettings, presetDifferences, settingsFromJson } from './presets.js';
 import { LayoutConverter, VIEW_MODES, View360 } from './view360.js';
@@ -214,6 +215,10 @@ video.addEventListener('loadedmetadata', () => {
   $('viewer-name').textContent = state.video.name;
   $('scrubber').max = String(video.duration || 1);
   $('ex-start').value = '0'; $('ex-end').value = fmt(video.duration, 2); state.rangesTouched = false;
+  // a downloaded video whose name says where it came from: a link to the original, at the playhead
+  state.video.origin = state.video.remote ? null : originOf(state.video.name);
+  $('video-original-row').hidden = !state.video.origin;
+  if (state.video.origin) { $('video-original').textContent = `open on ${state.video.origin.site} ↗`; $('video-original').title = `Opens ${state.video.origin.url(0)} in a new tab, at the moment shown here${state.video.origin.start != null ? ` (the dataset clip starts at ${state.video.origin.start} s)` : ''}.`; updateOriginalLink(); }
   ['play', 'prev-frame', 'next-frame', 'scrubber'].forEach(id => { $(id).disabled = false; });
   setStatus('Video ready');
   // Gaze in pixels that was loaded before the video: now the frame size is known, so are the value ranges.
@@ -248,6 +253,14 @@ function updateSubtitle() {
   if (state.gaze) parts.push(`${state.gaze.n.toLocaleString()} gaze rows, ${state.gaze.observers.length} observers`);
   $('viewer-subtitle').textContent = parts.join(' · ') || 'Load a video and gaze data';
 }
+
+function updateOriginalLink() {
+  const o = state.video?.origin;
+  if (o) $('video-original').href = o.url(originalTime(o, video.currentTime || 0, video.duration));
+}
+$('video-original').addEventListener('pointerdown', updateOriginalLink);
+$('video-original').addEventListener('focus', updateOriginalLink);
+$('video-original').addEventListener('click', updateOriginalLink);
 
 function setFps(f, source) {
   if (!(f > 0)) return;
@@ -1620,7 +1633,7 @@ function settingsJson(extra = {}) {
   const s = state.settings, g = state.gaze, [vw, vh] = videoSize();
   return {
     tool: 'OverGaze', version: VERSION, created: new Date().toISOString(),
-    video: state.video ? { name: state.video.name, width: vw, height: vh, duration_s: video.duration, fps: state.fps, fps_source: state.fpsSource } : null,
+    video: state.video ? { name: state.video.name, width: vw, height: vh, duration_s: video.duration, fps: state.fps, fps_source: state.fpsSource, original: state.video.origin ? { site: state.video.origin.site, id: state.video.origin.id, clip_start_s: state.video.origin.start, url: state.video.origin.url(originalTime(state.video.origin, 0, video.duration)) } : undefined } : null,
     gaze: g ? {
       files: state.files.map(f => (f.folder ? f.folder + '/' : '') + f.name), rows_read: state.gazeAll.n, rows_kept: g.n, kind: g.hasDuration ? 'fixations' : 'samples',
       observers_used: g.observers.filter((_, i) => state.observerEnabled[i]), conditions_used: g.conditions.filter((_, i) => state.conditionEnabled[i]),

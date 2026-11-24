@@ -610,3 +610,19 @@ test('scene memory: moving the remembered points on frame by frame (cache) gives
     assert.equal(close2, ka.length, `same places (within 0.02 rad) at ${t} s`);
   }
 });
+
+// ---------- link to the original video ----------
+import { originOf, originalTime } from '../src/origin.js';
+test('the original of a downloaded video, from its file name', () => {
+  const a = originOf('-hngyrNKt3g-315.webm');
+  assert.equal(a.site, 'YouTube'); assert.equal(a.id, '-hngyrNKt3g'); assert.equal(a.start, 315);
+  assert.equal(a.url(315), 'https://www.youtube.com/watch?v=-hngyrNKt3g&t=315');
+  assert.equal(originOf('TLcg-0-Qtw4-519.mp4').id, 'TLcg-0-Qtw4');
+  assert.equal(originOf('Lc5xpQBDWyg.webm').start, null);
+  assert.equal(originOf('Some talk [dQw4w9WgXcQ].mkv').id, 'dQw4w9WgXcQ');
+  assert.equal(originOf('youtube.com_watch_v=dQw4w9WgXcQ.mp4').id, 'dQw4w9WgXcQ');
+  assert.equal(originOf('clip from vimeo.com_76979871.mp4').url(12), 'https://vimeo.com/76979871#t=12s');
+  for (const n of ['16_Turtle.mp4', 'sample_erp.mp4', 'holidaytrip.mp4', '001.mp4', 'abcdefghijk.mp4']) assert.equal(originOf(n), null, n);
+  // a full download plays on the original's clock; a file cut at the clip start is shifted by it
+  assert.equal(originalTime(a, 320, 3395), 320); assert.equal(originalTime(a, 5, 30), 320);
+});
