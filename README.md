@@ -173,6 +173,14 @@ The readout under the video shows the points in the window, the observers that c
 
 ![Coverage readout](docs/screenshots/10-coverage-readout.png)
 
+### Scene memory
+
+**Scene memory weight w** (temporal pooling section, 0 = off) adds w × a map of everything people looked at since the clip started: past only, so it also works for a live mask. Each fixation counts by how many frames it lasted so far (each raw gaze sample once), moved along the motion (analysed or loaded) from its last moment to the current frame. The pooled map and the memory map are each divided by their maximum, added, and divided by the maximum again. The memory map is drawn at a quarter of the map width and enlarged (it is broad), and during playback the remembered points are moved on frame by frame instead of from where they were recorded, so it adds about 15 ms per frame on a 20 s Salient360 clip with 110 recordings.
+
+**Outline only the area scene memory adds** (display section, own colour, pink by default) outlines where the map with memory is salient (at or above the coverage threshold) but the pooled map alone is not: the places memory brings back. Scrub through a clip to judge whether those places hold salient things people skipped at this moment. The weight is saved in settings.json under `saliency.scene_memory_weight` (and in presets and templates), the outline under `display.memory_outline`; exported maps include the memory.
+
+On Salient360, "pooled + memory" ranks held-out viewers' fixations better than pooling alone (area under the curve 0.846 against 0.807) but most of that comes from knowing the scene's salient objects at all; see [docs/validation.md](docs/validation.md), sections 5 and 6.
+
 ### Gaze points
 
 **Show gaze points** draws one dot per fixation (or raw gaze sample) in the pooling window. **Colour = person**: both eyes of a person share it; the left eye (or a recording without a pair) is a circle, the right eye a square of the same area. The 12 colours are bright, ordered so that neighbours in the list differ most (also for colour-blind viewers), and every dot has a dark edge so it shows on bright video too; with more than 12 people they repeat. Under it, **more**:

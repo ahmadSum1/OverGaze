@@ -27,6 +27,7 @@ const state = {
   settings: { ...DEFAULTS, velocity: 0, minDurationMs: 0, eyePairing: 'auto' }, people: null,
   rowRules: [], agreement: null, observerSort: 'name',
   display: { outline: false, outlineColor: '#c8f56a', outlineTouched: false, outlineWidth: 2, mode: 'heat', colormap: 'jet', opacity: 0.65, gamma: 1, mapWidth: 512, showPoints: true, showFlow: false },
+  memoryOutline: { show: false, color: '#ff4fd8' },
   points: { size: 6, dwell: false, dwellCap: 3, eyeLines: false, motionLines: true, legend: true },
   flow: null, flowInfo: null, analysing: null, exporting: null, recording: null,
   work: {}, last: null, renderQueued: false, projectionTouched: false, density: null,
@@ -41,7 +42,7 @@ window.overgaze = {
   mapAt(k, width = 512, normalize = 'none') {
     const [vw, vh] = videoSize(), [W, H] = mapSize(width, state.settings, vw, vh);
     const r = renderMap(state.gaze, frameCentre(k, state.fps), settingsForRender(normalize), W, H, renderContext(), {});
-    return { W, H, map: Array.from(r.map), points: r.points.n };
+    return { W, H, map: Array.from(r.map), points: r.points.n, plain: r.plain ? Array.from(r.plain) : null };
   }
 };
 
@@ -129,7 +130,7 @@ function setLayout(layout, touched = false) {
 }
 function settingsForRender(normalize = 'max') { return { ...state.settings, normalize }; }
 function renderContext() {
-  return { fps: state.fps, tol: 0.5 / state.fps, observerEnabled: state.observerEnabled, conditionEnabled: state.conditionEnabled, flow: state.settings.motionComp ? state.flow : null };
+  return { fps: state.fps, tol: 0.5 / state.fps, observerEnabled: state.observerEnabled, conditionEnabled: state.conditionEnabled, flow: state.settings.motionComp ? state.flow : null, memoryFlow: state.flow };
 }
 function currentFrame() {
   const k = frameOf(video.paused ? video.currentTime : state.mediaTime, state.fps);
@@ -393,7 +394,7 @@ function render() {
     $('ro-map').textContent = `${W} × ${H}`;
     $('ro-ms').textContent = `${ms.toFixed(1)} ms per frame`;
     $('readout-badge').hidden = false;
-    $('readout-badge').textContent = `σ ${state.settings.sigmaDeg}° · ±${state.settings.windowSec} s${state.settings.causal ? ' past' : ''}${state.settings.motionComp && state.flow ? ' · motion-comp.' : ''}`;
+    $('readout-badge').textContent = `σ ${state.settings.sigmaDeg}° · ±${state.settings.windowSec} s${state.settings.causal ? ' past' : ''}${state.settings.motionComp && state.flow ? ' · motion-comp.' : ''}${state.settings.memoryWeight > 0 ? ` · memory ${state.settings.memoryWeight}` : ''}`;
   }
   const wrapX = state.settings.projection === 'erp', refOutline = !!(state.ref && state.showRef && state.refShow.outline);
   if (state.showGaze && state.display.mode !== 'off' && result) colorize(result.map, img.data, colorOpts);
@@ -403,6 +404,13 @@ function render() {
   state.outlines = { W, H, lines: [] };
   if (refOutline && ref) state.outlines.lines.push({ segs: outlineOf(ref.map, W, H, thr, wrapX), color: state.refShow.outlineColor, width: state.refShow.outlineWidth });
   if (state.showGaze && state.display.outline && result && result.max > 0) state.outlines.lines.push({ segs: outlineOf(result.map, W, H, thr, wrapX), color: state.display.outlineColor, width: state.display.outlineWidth });
+  // the area scene memory adds: salient in the map with memory, not salient in the pooled map alone
+  if (state.showGaze && state.memoryOutline.show && result?.plain && result.max > 0) {
+    const added = new Float32Array(W * H), cut = thr * result.max;
+    let any = false;
+    for (let i = 0; i < added.length; i++) if (result.map[i] >= cut && result.plain[i] < thr) { added[i] = 1; any = true; }
+    if (any) state.outlines.lines.push({ segs: contourSegments(added, W, H, 0.5, wrapX), color: state.memoryOutline.color, width: state.display.outlineWidth });
+  }
   // the reference heatmap has its own layer (under ours) and its own colours
   const rctx = refCanvas.getContext('2d');
   if (state.ref && state.showRef && state.refShow.heat && ref) {
@@ -1173,7 +1181,7 @@ const AGREE_W = 128, AGREE_H = 64, AGREE_MAX_FRAMES = 400;
 /** What the scores depend on: the gaze after filters and the settings that shape the maps. */
 function agreementKey() {
   const s = state.settings;
-  return JSON.stringify([s.projection, s.sigmaDeg, s.truncate, s.planarFovDeg, s.windowSec, s.kernel, s.peakTauSec, s.causal, s.durationWeight, s.motionComp && state.flow ? state.flowStamp : 0, s.lonOffsetDeg, s.flipX, s.flipY, state.fps, video.duration || 0]);
+  return JSON.stringify([s.projection, s.sigmaDeg, s.truncate, s.planarFovDeg, s.windowSec, s.kernel, s.peakTauSec, s.memoryWeight, s.causal, s.durationWeight, s.motionComp && state.flow ? state.flowStamp : 0, s.lonOffsetDeg, s.flipX, s.flipY, state.fps, video.duration || 0]);
 }
 let agreementTimer = 0;
 function scheduleAgreement() {
@@ -1223,6 +1231,7 @@ $('obs-none').addEventListener('click', () => { if (!state.gaze) return; state.o
 
 // ---------- motion analysis ----------
 function updateFlowUi() {
+  updateMemoryHint();
   const f = state.flow;
   $('motion').disabled = !f; $('show-flow').disabled = !f; $('clear-flow').disabled = !f;
   if (f && state.wantMotion && !state.settings.motionComp) { state.settings.motionComp = true; $('motion').checked = true; }
@@ -1350,6 +1359,14 @@ $('color-ramp').style.background = cssGradient('jet');
 $('opacity').addEventListener('input', e => { state.display.opacity = Number(e.target.value) / 100; $('opacity-value').textContent = `${e.target.value}%`; requestRender(); });
 $('gamma').addEventListener('input', e => { state.display.gamma = Number(e.target.value); $('gamma-value').textContent = Number(e.target.value).toFixed(2); requestRender(); });
 $('map-width').addEventListener('change', e => { state.display.mapWidth = Number(e.target.value); requestRender(); });
+$('memory-weight').addEventListener('change', e => applySettings({ memoryWeight: e.target.value }));
+$('show-memory-outline').addEventListener('change', e => { state.memoryOutline.show = e.target.checked; if (e.target.checked) state.showGaze = true; syncLayerChips(); requestRender(); });
+$('memory-outline-color').addEventListener('input', e => { state.memoryOutline.color = e.target.value; requestRender(); });
+function updateMemoryHint() {
+  const w = state.settings.memoryWeight, el = $('memory-hint');
+  el.hidden = !(w > 0);
+  el.textContent = w > 0 ? (state.flow ? `Adds ${w} × everything looked at since the clip started, moved along the motion to this frame (each map divided by its maximum first).` : `Adds ${w} × everything looked at since the clip started. No motion analysed or loaded: the remembered places are not moved with the camera.`) : '';
+}
 $('show-outline').addEventListener('change', e => { state.display.outline = e.target.checked; state.display.outlineTouched = true; if (e.target.checked) state.showGaze = true; syncLayerChips(); requestRender(); });
 $('show-points').addEventListener('change', e => { state.display.showPoints = e.target.checked; if (e.target.checked) state.showGaze = true; syncLayerChips(); requestRender(); });
 $('speed').addEventListener('change', e => { video.playbackRate = Number(e.target.value); });
@@ -1365,6 +1382,7 @@ function applySettings(o) {
   for (const [key, id] of [['causal', 'causal'], ['durationWeight', 'duration-weight'], ['flipX', 'flip-x'], ['flipY', 'flip-y']]) if (key in o) { S[key] = !!o[key]; $(id).checked = !!o[key]; }
   if ('motionComp' in o) { S.motionComp = !!o.motionComp && !!state.flow; $('motion').checked = S.motionComp; state.wantMotion = !!o.motionComp; }
   if ('velocity' in o) { S.velocity = Math.max(0, Number(o.velocity) || 0); $('vel').value = String(S.velocity); }
+  if ('memoryWeight' in o) { S.memoryWeight = Math.min(2, Math.max(0, Number(o.memoryWeight) || 0)); $('memory-weight').value = String(S.memoryWeight); updateMemoryHint(); }
   if ('eyePairing' in o && ['auto', 'off'].includes(o.eyePairing) && o.eyePairing !== S.eyePairing) { S.eyePairing = o.eyePairing; $('eye-pairing').value = o.eyePairing; updatePairs(); renderGroups(); }
   if ('minDurationMs' in o) { S.minDurationMs = Math.max(0, Number(o.minDurationMs) || 0); $('min-dur').value = String(S.minDurationMs); }
   if (('velocity' in o || 'minDurationMs' in o) && state.gazeAll) applyGazeFilters();
@@ -1482,6 +1500,7 @@ $('template-input').addEventListener('change', async e => {
     const raw = JSON.parse(await f.text()), { name, settings, rowRules } = settingsFromJson(raw);
     applySettings(settings);
     if (raw.display?.gaze_points) applyPoints(raw.display.gaze_points);
+    if (raw.display?.memory_outline) { state.memoryOutline.show = !!raw.display.memory_outline.show; if (/^#[0-9a-f]{6}$/i.test(raw.display.memory_outline.colour || '')) state.memoryOutline.color = raw.display.memory_outline.colour; $('show-memory-outline').checked = state.memoryOutline.show; $('memory-outline-color').value = state.memoryOutline.color; requestRender(); }
     if (rowRules) setRowRules(rowRules);
     const list = loadTemplates(), label = name || f.name.replace(/\.(overgaze\.)?json$/i, '');
     list.push({ name: label, settings });
@@ -1571,10 +1590,10 @@ function settingsJson(extra = {}) {
       observers_used: g.observers.filter((_, i) => state.observerEnabled[i]), conditions_used: g.conditions.filter((_, i) => state.conditionEnabled[i]),
       column_mapping: state.mapping
     } : null,
-    display: { gaze_points: pointsJson() },
+    display: { gaze_points: pointsJson(), memory_outline: { show: state.memoryOutline.show, colour: state.memoryOutline.color, area: 'salient (≥ coverage threshold × maximum) with memory, not salient in the pooled map alone' } },
     saliency: {
       projection: s.projection, sigma_deg: s.sigmaDeg, kernel_cutoff_sigma: s.truncate, planar_fov_deg: s.projection === 'planar' ? s.planarFovDeg : undefined,
-      pooling_window_s: s.windowSec, pooling_weight: s.kernel, peaked_tau_s: s.kernel === 'peaked' ? (s.peakTauSec ?? 0.25) : undefined, causal: s.causal, weight_by_duration: s.durationWeight,
+      pooling_window_s: s.windowSec, pooling_weight: s.kernel, peaked_tau_s: s.kernel === 'peaked' ? (s.peakTauSec ?? 0.25) : undefined, scene_memory_weight: s.memoryWeight || 0, scene_memory: s.memoryWeight > 0 ? 'map = pooled map ÷ its maximum + w × memory map ÷ its maximum, then ÷ the maximum; memory = every fixation (weighted by its frames so far) or gaze sample from the clip start to this frame, moved along the motion to this frame' + (state.flow ? '' : ' (no motion: not moved)') : undefined, causal: s.causal, weight_by_duration: s.durationWeight,
       motion_compensation: !!(s.motionComp && state.flow), lon_offset_deg: s.lonOffsetDeg, flip_left_right: s.flipX, flip_up_down: s.flipY,
       velocity_filter_deg_per_s: s.velocity || 0, coverage_threshold: s.coverageThreshold,
       frame_rule: 'frame k covers [k/fps, (k+1)/fps); a gaze sample or fixation counts if its time distance to that interval is <= pooling_window_s (0 = active during the frame).',
@@ -1707,7 +1726,7 @@ async function exportMaps() {
     cmd: 'init', W, H, format, fps: state.fps, settings,
     gaze: { n: g.n, t0: g.t0, t1: g.t1, lon: g.lon, lat: g.lat, obs: g.obs, cond: g.cond, w: g.w, maxDur: g.maxDur },
     observerEnabled: state.observerEnabled, conditionEnabled: state.conditionEnabled,
-    flow: settings.motionComp && state.flow ? state.flow.serialize() : null
+    flow: (settings.motionComp || settings.memoryWeight > 0) && state.flow ? state.flow.serialize() : null
   });
   const request = (seq, k) => new Promise(resolve => { waiters.set(seq, resolve); worker.postMessage({ cmd: 'frame', seq, t: frameCentre(k, state.fps) }); });
   const rows = ['index,frame,time_s,points,raw_max,coverage_pixels,coverage_sphere'];

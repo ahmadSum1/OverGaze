@@ -27,6 +27,7 @@ export const DEFAULTS = Object.freeze({
   windowSec: 0,             // temporal pooling half-width: frames within ±windowSec are pooled
   kernel: 'box',            // 'box' | 'triangle' | 'gaussian' (σ_t = windowSec / 2) | 'peaked' (exp(−|Δt| / peakTauSec))
   peakTauSec: 0.25,         // 'peaked' only: how fast the weight falls away from the current frame
+  memoryWeight: 0,          // scene memory: + w × the map of everything looked at since the clip started (0 = off)
   causal: false,            // only use gaze from the past (as a deployed, real-time mask would)
   durationWeight: false,    // weight each fixation by its duration
   motionComp: false,        // warp pooled gaze along optical flow into the current frame
@@ -186,11 +187,93 @@ export function renderMap(g, t, s, W, H, ctx = {}, work = {}) {
     if (!work.grid || work.grid.W !== W || work.grid.H !== H) work.grid = makeGrid(W, H);
     splatSphere(map, work.grid, work.points, Math.max(0.05, s.sigmaDeg) * DEG, s.truncate);
   }
+  work.plain = null;
+  if (s.memoryWeight > 0) {
+    // scene memory: the pooled map and the memory map, each divided by its own maximum, added with weight w
+    // drawn at a quarter of the width (a broad map of the whole clip; thousands of points), then enlarged
+    const mw = Math.max(32, Math.round(W / 4)), mh = Math.max(16, Math.round(H * mw / W));
+    if (!work.memSmall || work.memSmall.length !== mw * mh) work.memSmall = new Float32Array(mw * mh);
+    if (!work.mem || work.mem.length !== W * H) work.mem = new Float32Array(W * H);
+    const small = work.memSmall, mem = work.mem; small.fill(0);
+    work.memPoints = memoryPoints(g, t, s, ctx, work.memPoints || makePointBuffer(), work.memCache || (work.memCache = {}));
+    if (s.projection === 'planar') splatPlanar(small, mw, mh, work.memPoints, planarSigmaPx(s, mw), s.truncate);
+    else {
+      if (!work.memGrid || work.memGrid.W !== mw || work.memGrid.H !== mh) work.memGrid = makeGrid(mw, mh);
+      splatSphere(small, work.memGrid, work.memPoints, Math.max(0.05, s.sigmaDeg) * DEG, s.truncate);
+    }
+    enlarge(small, mw, mh, mem, W, H, s.projection !== 'planar');
+    let bm = 0, mm = 0;
+    for (let i = 0; i < map.length; i++) { if (map[i] > bm) bm = map[i]; if (mem[i] > mm) mm = mem[i]; }
+    if (!work.plainBuf || work.plainBuf.length !== W * H) work.plainBuf = new Float32Array(W * H);
+    const plain = work.plainBuf;
+    for (let i = 0; i < map.length; i++) { plain[i] = bm > 0 ? map[i] / bm : 0; map[i] = plain[i] + (mm > 0 ? s.memoryWeight * mem[i] / mm : 0); }
+    work.plain = plain;
+  }
   let max = 0, sum = 0;
   for (let i = 0; i < map.length; i++) { const v = map[i]; if (v > max) max = v; sum += v; }
   if (s.normalize === 'max' && max > 0) for (let i = 0; i < map.length; i++) map[i] /= max;
   else if (s.normalize === 'sum' && sum > 0) for (let i = 0; i < map.length; i++) map[i] /= sum;
-  return { map, max, sum, points: work.points };
+  return { map, max, sum, points: work.points, plain: work.plain, memoryPoints: s.memoryWeight > 0 ? work.memPoints.n : 0 };
+}
+
+/** Bilinear enlargement of a small map (pixel centres aligned), joining the left and right edges for 360° maps. */
+function enlarge(src, sw, sh, dst, W, H, wrap) {
+  for (let y = 0; y < H; y++) {
+    const fy = Math.min(sh - 1, Math.max(0, (y + 0.5) * sh / H - 0.5)), y0 = Math.floor(fy), y1 = Math.min(sh - 1, y0 + 1), ay = fy - y0;
+    for (let x = 0; x < W; x++) {
+      let fx = (x + 0.5) * sw / W - 0.5;
+      let x0 = Math.floor(fx), ax = fx - x0, x1 = x0 + 1;
+      if (wrap) { x0 = (x0 + sw) % sw; x1 = x1 % sw; } else { x0 = Math.max(0, x0); x1 = Math.min(sw - 1, x1); if (fx < 0) ax = 0; }
+      dst[y * W + x] = (src[y0 * sw + x0] * (1 - ax) + src[y0 * sw + x1] * ax) * (1 - ay) + (src[y1 * sw + x0] * (1 - ax) + src[y1 * sw + x1] * ax) * ay;
+    }
+  }
+}
+
+/**
+ * Scene memory: everything looked at from the start of the clip up to time t (past only, so it also works live),
+ * one point per fixation weighted by how long it had lasted by t (in frames), or one per gaze sample; each moved
+ * along the motion (ctx.memoryFlow, when analysed or loaded) from its last moment to t.
+ * `cache` makes playback fast: finished fixations already moved to an earlier time are only moved on from there
+ * (moving a→b then b→c is moving a→c), so each frame moves them one frame further instead of from where they were
+ * recorded; fixations still going are kept aside until they end. Going back, other observers or other settings
+ * start again from the beginning.
+ */
+export function memoryPoints(g, t, s, ctx = {}, out = makePointBuffer(), cache = null) {
+  out.n = 0;
+  if (!g || !g.n) return out;
+  const fps = ctx.fps || 30, tol = ctx.tol ?? 0.5 / fps, flow = ctx.memoryFlow || null;
+  const offset = (s.lonOffsetDeg || 0) * DEG, obsOn = ctx.observerEnabled, condOn = ctx.conditionEnabled;
+  const key = [s.lonOffsetDeg, s.flipX, s.flipY, fps, obsOn ? obsOn.join('') : '', condOn ? condOn.join('') : ''].join('|');
+  const usable = cache && cache.g === g && cache.flow === flow && cache.key === key && cache.t <= t;
+  // done: finished fixations (and samples), already moved to cache.t; pending: rows started but not finished then
+  const done = usable ? cache.done : { n: 0, lon: [], lat: [], w: [], obs: [] };
+  const wasPending = usable ? cache.pending : [];
+  let next = usable ? cache.next : 0;
+  if (usable && flow && t > cache.t) for (let k = 0; k < done.n; k++) { const p = flow.propagate(done.lon[k], done.lat[k], cache.t, t); done.lon[k] = p[0]; done.lat[k] = p[1]; }
+  const place = i => {
+    let lon = s.flipX ? -g.lon[i] : g.lon[i], lat = s.flipY ? -g.lat[i] : g.lat[i];
+    lon += offset; lon -= TAU * Math.floor((lon + Math.PI) / TAU);
+    return [lon, lat];
+  };
+  const frames = (i, last) => g.w[i] * (g.t1[i] - g.t0[i] > 0.5 / fps ? Math.max(1, (last - g.t0[i]) * fps) : 1);
+  const pending = [];
+  const take = i => {
+    if ((obsOn && !obsOn[g.obs[i]]) || (condOn && !condOn[g.cond[i]])) return;
+    if (g.t1[i] > t) { pending.push(i); return; }
+    let [lon, lat] = place(i);
+    if (flow && Math.abs(g.t1[i] - t) > 1e-6) [lon, lat] = flow.propagate(lon, lat, g.t1[i], t);
+    done.lon.push(lon); done.lat.push(lat); done.w.push(frames(i, g.t1[i])); done.obs.push(g.obs[i]); done.n++;
+  };
+  for (const i of wasPending) take(i);
+  for (; next < g.n && g.t0[next] <= t + tol; next++) take(next);
+  if (cache) Object.assign(cache, { g, flow, key, t, done, pending, next });
+  for (let k = 0; k < done.n; k++) push(out, done.lon[k], done.lat[k], done.w[k], done.obs[k]);
+  // still going at t: from where they are now
+  for (const i of pending) {
+    let [lon, lat] = place(i);
+    push(out, lon, lat, frames(i, t), g.obs[i]);
+  }
+  return out;
 }
 
 /**

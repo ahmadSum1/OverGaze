@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { inflateSync } from 'node:zlib';
 import { buildGaze, detectMapping, parseTable, toLonLat, vectorToLonLat, velocityFilter, packRecords } from '../src/gaze.js';
-import { collectPoints, coverage, makeGrid, renderMap, splatSphere, makePointBuffer, DEFAULTS, frameCentre } from '../src/saliency.js';
+import { collectPoints, coverage, makeGrid, renderMap, splatSphere, makePointBuffer, DEFAULTS, frameCentre, memoryPoints } from '../src/saliency.js';
 import { FlowStore, opticalFlow } from '../src/flow.js';
 import { crc32, encodeGrayPng, npyHeader, ZipWriter } from '../src/export.js';
 
@@ -570,4 +570,43 @@ test('marks: raw gaze samples dwell while the eye stays within 1.5° of where it
   const marks = collectMarks(g, 0.95, { ...DEFAULTS, windowSec: 1, motionComp: true }, { fps: 10, flow });
   const first = marks.find(m => m.dt < -0.9);
   assert.ok(first.lon > first.lon0, 'an earlier point is moved along the motion'); close(first.lat, first.lat0, 1e-9);
+});
+
+// ---------- scene memory ----------
+test('scene memory adds, with weight w, the places looked at since the clip started, moved along the motion', () => {
+  const W = 64, H = 32, px = x => ((x + 0.5) / W - 0.5) * 2 * Math.PI;
+  // one observer looks at x = 10 from 0 to 1 s, then at x = 40 from 2 to 3 s
+  const g = packRecords([[0, 1, px(10), 0, 0, 0, 1], [2, 3, px(40), 0, 0, 0, 1]], ['o'], ['c']);
+  const s = { ...DEFAULTS, sigmaDeg: 4, windowSec: 0 };
+  const peak = m => { let a = 0; for (let i = 0; i < m.length; i++) if (m[i] > m[a]) a = i; return a % W; };
+  const plain = renderMap(g, 2.5, s, W, H, { fps: 10 });
+  assert.equal(plain.plain, null, 'no memory: no plain map returned');
+  const row = H / 2 | 0, at = (m, x) => m[row * W + x];
+  const memo = renderMap(g, 2.5, { ...s, memoryWeight: 0.3 }, W, H, { fps: 10 });
+  assert.ok(at(memo.map, 10) > 0.25 && at(memo.map, 10) < 0.35, `the remembered place: 0.3 × 1 against 1 + 0.3 × 0.5 at the current gaze, so about 0.26 of the maximum (${at(memo.map, 10)})`);
+  assert.equal(peak(memo.map), 40, 'the current gaze stays the peak');
+  assert.ok(at(memo.plain, 10) < 0.01, 'the plain map has nothing there');
+  // with motion of 5 px/s the remembered place has moved by (2.5 − 1) × 5 = 7.5 px
+  const flow = new FlowStore(W, H); const u = new Float32Array(W * H).fill(0.5), v = new Float32Array(W * H);
+  for (let k = 0; k < 40; k++) flow.add(k * 0.1, (k + 1) * 0.1, u, v);
+  const moved = renderMap(g, 2.5, { ...s, memoryWeight: 0.3 }, W, H, { fps: 10, memoryFlow: flow });
+  let best = 0; for (let x = 0; x < 30; x++) if (at(moved.map, x) > at(moved.map, best)) best = x;
+  assert.ok(Math.abs(best - 17.5) <= 1, `moved along the motion: x ${best}`);
+});
+
+test('scene memory: moving the remembered points on frame by frame (cache) gives the same points as moving them from scratch', () => {
+  const W = 64, H = 32, rec = [];
+  for (let k = 0; k < 60; k++) rec.push([k * 0.05, k * 0.05 + 0.12, ((k * 7) % 60 - 30) * DEG, ((k * 3) % 20 - 10) * DEG, k % 3, 0, 1]);
+  const g = packRecords(rec, ['a', 'b', 'c'], ['x']);
+  const flow = new FlowStore(W, H); const u = new Float32Array(W * H).fill(0.7), v = new Float32Array(W * H).fill(0.1);
+  for (let k = 0; k < 40; k++) flow.add(k * 0.1, (k + 1) * 0.1, u, v);
+  const s = { ...DEFAULTS, memoryWeight: 0.3 }, ctx = { fps: 30, memoryFlow: flow }, cache = {};
+  for (const t of [0.5, 0.7, 0.71, 1.4, 2.95]) {
+    const a = memoryPoints(g, t, s, ctx, undefined, cache), b = memoryPoints(g, t, s, ctx);
+    assert.equal(a.n, b.n, `same number of points at ${t} s`);
+    const key = p => Array.from({ length: p.n }, (_, i) => [p.obs[i], p.w[i].toFixed(3), p.lon[i].toFixed(3), p.lat[i].toFixed(3)].join()).sort().join(';');
+    const ka = key(a).split(';'), kb = key(b).split(';');
+    let close2 = 0; for (let i = 0; i < ka.length; i++) { const x = ka[i].split(','), y = kb[i].split(','); if (x[0] === y[0] && Math.abs(x[2] - y[2]) < 0.02 && Math.abs(x[3] - y[3]) < 0.02) close2++; }
+    assert.equal(close2, ka.length, `same places (within 0.02 rad) at ${t} s`);
+  }
 });
