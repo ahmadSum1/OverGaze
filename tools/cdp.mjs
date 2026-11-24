@@ -1,22 +1,28 @@
 // Minimal Chrome DevTools Protocol driver (no dependencies; needs Node 22+ for the built-in WebSocket).
 // Used for the browser checks and the feature screenshots (see tools/browser-check.mjs).
 import { spawn } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 export async function launch({ width = 1500, height = 900, args = [] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'overgaze-chrome-'));
-  const port = 9300 + Math.floor(Math.random() * 500);
+  // Port 0: Chrome picks a free port and writes it to DevToolsActivePort in its own profile folder. A port picked
+  // at random here could already be taken by another test browser started at the same time; this browser would
+  // then fail to listen and the driver would connect to the other one, so two scripts would drive one page.
   const chrome = spawn(process.env.CHROME || 'google-chrome', [
-    '--headless=new', '--disable-gpu', '--hide-scrollbars', `--remote-debugging-port=${port}`,
+    '--headless=new', '--disable-gpu', '--hide-scrollbars', '--remote-debugging-port=0',
     `--user-data-dir=${dir}`, `--window-size=${width},${height}`, '--autoplay-policy=no-user-gesture-required',
     ...args, 'about:blank'], { stdio: 'ignore' });
-  let targets;
-  for (let i = 0; i < 100; i++) {
-    try { targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json(); if (targets.length) break; } catch {}
-    await new Promise(r => setTimeout(r, 100));
+  let port = 0, targets;
+  for (let i = 0; i < 300 && !targets?.length; i++) {
+    try {
+      port ||= Number(readFileSync(join(dir, 'DevToolsActivePort'), 'utf8').split('\n')[0]);
+      if (port) targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
+    } catch {}
+    if (!targets?.length) await new Promise(r => setTimeout(r, 100));
   }
+  if (!targets?.length) { chrome.kill(); throw new Error('Chrome did not start (no DevToolsActivePort)'); }
   const page = targets.find(t => t.type === 'page');
   const ws = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise(r => ws.addEventListener('open', r));
@@ -36,7 +42,11 @@ export async function launch({ width = 1500, height = 900, args = [] } = {}) {
   await send('Runtime.enable'); await send('Page.enable'); await send('DOM.enable'); await send('Log.enable');
   const api = {
     logs, send,
-    async goto(url) { await send('Page.navigate', { url }); await new Promise(r => setTimeout(r, 800)); },
+    async goto(url) {
+      const loaded = new Promise(r => { const h = m => { if (m.method === 'Page.loadEventFired') { handlers.splice(handlers.indexOf(h), 1); r(); } }; handlers.push(h); });
+      await send('Page.navigate', { url });
+      await Promise.race([loaded, new Promise(r => setTimeout(r, 30000))]);
+    },
     async eval(expr) {
       const r = await send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
       if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
