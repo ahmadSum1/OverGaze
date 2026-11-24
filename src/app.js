@@ -330,6 +330,7 @@ function onVideoFrame(now, meta) {
     if (state.fpsDeltas.length === 60 && state.fpsSource === 'default') { const f = fpsFromDeltas(state.fpsDeltas); if (f) setFps(f, 'measured'); }
   }
   state.lastFrameMeta = meta;
+  if (keepInLoop()) return requestAnimationFrame(() => video.requestVideoFrameCallback(onVideoFrame));
   render();
   state.recording?.onFrame(meta);
   if (!video.paused && !video.ended) video.requestVideoFrameCallback(onVideoFrame);
@@ -342,11 +343,12 @@ function rafLoop() {
 video.addEventListener('play', () => {
   $('play').textContent = '❚❚'; $('play').setAttribute('aria-label', 'Pause');
   state.lastFrameMeta = null;
+  keepInLoop(true);
   if ('requestVideoFrameCallback' in video) video.requestVideoFrameCallback(onVideoFrame); else requestAnimationFrame(rafLoop);
 });
 video.addEventListener('pause', () => { $('play').textContent = '▶'; $('play').setAttribute('aria-label', 'Play'); state.mediaTime = video.currentTime; requestRender(); });
 video.addEventListener('seeked', () => { state.mediaTime = video.currentTime; requestRender(); });
-video.addEventListener('ended', () => { state.recording?.finish(); });
+video.addEventListener('ended', () => { const recording = !!state.recording; state.recording?.finish(); if (!recording) keepInLoop(); });
 
 function togglePlay() { if (!state.video) return; if (state.ref) state.ref.resume = false; if (video.paused) video.play().catch(e => showError(String(e.message || e))); else video.pause(); }
 function stepFrames(n) {
@@ -2046,8 +2048,27 @@ $('cyl-hfov').addEventListener('change', e => setLayoutOption({ hfov: Math.max(1
   });
 }
 
-// ⟳: start again at the end of the video
-$('loop').addEventListener('click', () => {
-  video.loop = !video.loop;
-  $('loop').classList.toggle('active', video.loop); $('loop').setAttribute('aria-pressed', String(video.loop));
-});
+// ⟳: repeat the whole video, the export range or the gaze range (chosen next to it)
+function setLoop(on, range = $('loop-range').value) {
+  state.loop = on ? range : null;
+  $('loop-range').value = range;
+  video.loop = state.loop === 'all';   // the whole video: the browser repeats it itself
+  $('loop').classList.toggle('active', !!state.loop); $('loop').setAttribute('aria-pressed', String(!!state.loop));
+  if (state.loop && state.loop !== 'all' && !video.paused) keepInLoop(true);
+}
+/** While repeating a range: back to its start at its end (and when playing starts outside it). */
+function keepInLoop(starting = false) {
+  if (!state.loop || state.loop === 'all') return false;
+  const [a, b] = rangeOf(state.loop);
+  if (!(b > a)) return false;
+  const t = video.currentTime;
+  if (t >= b - 0.5 / state.fps || video.ended || (starting && t < a - 0.5 / state.fps)) {
+    video.currentTime = frameCentre(frameOf(a, state.fps), state.fps);
+    if (video.paused) video.play().catch(() => {});
+    return true;
+  }
+  return false;
+}
+$('loop').addEventListener('click', () => setLoop(!state.loop));
+$('loop-range').addEventListener('change', e => setLoop(true, e.target.value));
+video.addEventListener('timeupdate', () => { if (!video.paused) keepInLoop(); });

@@ -243,7 +243,7 @@ It samples frames the same way as **Analyse motion** (seek). The file holds `t_a
 
 ## Keyboard and mouse
 
-Click on the video: play / pause (in the 360° view a click, not a drag; a double-click resets the view). ⟳ next to the frame buttons (or L): start again at the end. Space: play / pause. Left / right: one frame. Shift + left / right: one second. M: motion compensation on / off. P: gaze points on / off.
+Click on the video: play / pause (in the 360° view a click, not a drag; a double-click resets the view). ⟳ next to the frame buttons (or L): repeat; the menu next to it chooses what: the whole video, the export range or the gaze range (playing from outside the range starts at its beginning). Space: play / pause. Left / right: one frame. Shift + left / right: one second. M: motion compensation on / off. P: gaze points on / off.
 
 ## Development
 

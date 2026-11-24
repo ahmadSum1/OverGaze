@@ -661,3 +661,27 @@ test('motion range: export range and the new gaze range are analysed, and a vide
     assert.deepEqual(b.logs, []);
   } finally { b.close(); server.close(); }
 });
+
+test('repeat a range: the export range or the gaze range plays over and over; the whole video still repeats natively', opts, async () => {
+  const { server, url } = await serve(), b = await launch();
+  try {
+    await b.goto(url + '?sample');
+    await b.waitFor('!!overgaze.state.gaze && document.querySelector("#video").readyState >= 2', 20000);
+    await b.eval(`document.querySelector('#ex-start').value = '2'; document.querySelector('#ex-end').value = '3'; 1`);
+    await b.eval(`(e => { e.value = 'export'; e.dispatchEvent(new Event('change')); return 1; })(document.querySelector('#loop-range'))`);
+    assert.equal(await b.eval('document.querySelector("#loop").getAttribute("aria-pressed")'), 'true', 'choosing a range switches repeat on');
+    await b.eval(`window.__seen = []; const v = document.querySelector('#video'); v.addEventListener('timeupdate', () => window.__seen.push(v.currentTime)); v.currentTime = 6; v.play(); 1`);
+    await new Promise(r => setTimeout(r, 3500));
+    const seen = await b.eval('window.__seen');
+    assert.ok(seen.length > 5 && seen.every(t => t >= 1.9 && t <= 3.2), `stays within 2–3 s (from ${Math.min(...seen).toFixed(2)} to ${Math.max(...seen).toFixed(2)})`);
+    assert.ok(seen.some((t, i) => i && t < seen[i - 1] - 0.5), 'went back to the start at least once');
+    // the gaze range of the sample: 0.03–8.15 s widened by the window (0 s here)
+    await b.eval(`(e => { e.value = 'gaze'; e.dispatchEvent(new Event('change')); return 1; })(document.querySelector('#loop-range'))`);
+    assert.equal(await b.eval('overgaze.state.loop'), 'gaze');
+    await b.eval(`(e => { e.value = 'all'; e.dispatchEvent(new Event('change')); return 1; })(document.querySelector('#loop-range'))`);
+    assert.equal(await b.eval('document.querySelector("#video").loop'), true);
+    await b.click('#loop');
+    assert.deepEqual(await b.eval('[overgaze.state.loop, document.querySelector("#video").loop]'), [null, false], '⟳ switches repeat off');
+    assert.deepEqual(b.logs, []);
+  } finally { b.close(); server.close(); }
+});
