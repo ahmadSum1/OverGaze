@@ -743,6 +743,8 @@ Looked at again later: the salient area of everyone's first 3 s, moved along the
 
 ## 6. Shuffled AUC with comparison fixations from other videos (report 5)
 
+Comparison fixations for "across videos": 334 from each of the other 18 videos of the same set (about 6,000), spread evenly over all their fixations, any time. "Within video" as in section 5: fixations of the same video more than 2 s away, at the evaluated frames. Both scored on the same held-out fixations of the same frames and splits, recomputed in this run.
+
 **Salient360** (19 videos, 1887 frames, held out as in section 2):
 
 | map | shuffled AUC, across videos | shuffled AUC, within video |
