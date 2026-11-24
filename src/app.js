@@ -1,12 +1,12 @@
 import { FILE_TIME, RULE_OPS, buildGaze, columnValues, dropObservers, defaultRanges, detectMapping, gazeToCsv, minDurationFilter, parseTable, pathMatchesVideo, ruleText, velocityFilter } from './gaze.js';
-import { agreementScorer } from './agreement.js';
+import { agreementScorer, lowScores } from './agreement.js';
 import { DEFAULTS, coverage, frameCentre, frameOf, mapSize, renderMap } from './saliency.js';
 import { FlowStore, toGray } from './flow.js';
 import { openMotionFile } from './motionfile.js';
 import { ZipWriter, encodeGrayPng, npyHeader } from './export.js';
 import { fpsFromDeltas } from './timing.js';
 import { fpsFromMp4File } from './mp4fps.js';
-import { pairEyes } from './pairs.js';
+import { pairEyes, withoutEye } from './pairs.js';
 import { compareMaps, openReference, referencesFor, resample } from './reference.js';
 import { PRESETS, pickSettings, presetDifferences, settingsFromJson } from './presets.js';
 import { LayoutConverter, VIEW_MODES, View360 } from './view360.js';
@@ -898,6 +898,7 @@ function rebuildGaze() {
     const prevCond = state.gaze ? new Map(state.gaze.conditions.map((c, i) => [c, state.conditionEnabled[i]])) : null;
     const built = buildGaze(state.files, state.mapping, { fps: state.fps, rules: state.rowRules });
     const removed = new Set(built.observers.map((o, i) => state.removedObservers?.has(o) ? i : -1).filter(i => i >= 0));
+    state.gazeBuilt = built;
     state.gazeAll = dropObservers(built, removed);
     state.gazeAll.skipped = built.skipped; state.gazeAll.ruleRemoved = built.ruleRemoved; state.gazeAll.rules = built.rules;
     updatePairs();
@@ -918,10 +919,10 @@ function rebuildGaze() {
  */
 /**
  * Pair each person's left and right eye (see pairs.js). Made on the gaze before the duration and speed filters, so
- * the pairs do not change with them; observers removed with × are left out.
+ * the pairs do not change with them, nor with removing a recording (its partner then stays as a one-eye person).
  */
 function updatePairs() {
-  const g = state.gazeAll, m = state.mapping;
+  const g = state.gazeBuilt, m = state.mapping;
   state.people = g && state.settings.eyePairing !== 'off' ? pairEyes(g, { preset: m?.preset, observerFrom: m?.observerFrom, fileCount: state.files.length }) : null;
   const P = state.people, el = $('pair-status');
   if (!el) return;
@@ -989,23 +990,76 @@ function renderGroups() {
       : 'No frame where this observer and the others both have gaze.';
     return `<b class="agree${low ? ' low' : ''}" title="${escapeHtml(tip)}">${low ? '⚠ ' : ''}${Number.isFinite(v) ? (Math.abs(v) < 0.005 ? 0 : v).toFixed(2) : '—'}</b>`;
   };
+  if (state.people) { renderPeople(g, obsCounts, A, removed); return; }
   $('observer-list').innerHTML = order.map(i => { const o = g.observers[i]; return `<div class="observer-row${A?.low.set.has(i) ? ' flagged' : ''}"><label><input type="checkbox" data-obs="${i}" ${state.observerEnabled[i] ? 'checked' : ''}><i style="background:${obsColor(i)}"></i><span title="${escapeHtml(o)}">${escapeHtml(o)}</span><small>${obsCounts[i]}</small>${scoreCell(i)}</label><button class="row-remove" type="button" data-remove="${i}" title="Remove ${escapeHtml(o)}" aria-label="Remove ${escapeHtml(o)}">×</button></div>`; }).join('')
     + (removed.size ? `<button id="restore-observers" class="link-button" type="button">bring back the ${removed.size} removed</button>` : '');
 }
+/** The people of the current gaze set: observer indexes of state.gaze (the pairs are made on state.gazeAll). */
+function peopleNow() {
+  const P = state.people, g = state.gaze, all = state.gazeBuilt;
+  if (!P || !g || !all) return [];
+  const removed = state.removedObservers || new Set();
+  const idx = new Map(g.observers.map((o, i) => [o, i])), at = i => (i >= 0 && !removed.has(all.observers[i]) ? idx.get(all.observers[i]) ?? -1 : -1);
+  return P.people.map((p, k) => ({ k, left: at(p.left), right: at(p.right), match: p.score })).filter(p => p.left >= 0 || p.right >= 0);
+}
+const shortName = o => o.split('/').pop();
+// a recording numbered within its file ("…#07") is shown as L#07 / R#07, otherwise by its own name
+const recName = (o, side) => (/#\d+$/.test(o) ? side + o.match(/#\d+$/)[0] : shortName(o));
+function personName(g, p) {
+  const l = p.left >= 0 ? g.observers[p.left] : null, r = p.right >= 0 ? g.observers[p.right] : null;
+  if (state.people.method === 'names') return withoutEye(shortName(l || r));
+  return [l && recName(l, 'L'), r && recName(r, 'R')].filter(Boolean).join(' + ');
+}
+/** A person's agreement: the mean of their eyes' scores (each eye is scored against the other observers of its side). */
+function personScore(A, p) {
+  const v = [p.left, p.right].filter(i => i >= 0).map(i => A.scores[i]).filter(Number.isFinite);
+  return v.length ? v.reduce((a, b) => a + b, 0) / v.length : NaN;
+}
+/** One row per person, their left and right eye underneath (collapsible). */
+function renderPeople(g, counts, A, removed) {
+  let people = peopleNow();
+  const scores = A ? people.map(p => personScore(A, p)) : null, low = A ? lowScores(scores) : null;
+  people = people.map((p, i) => ({ ...p, score: scores?.[i] ?? NaN, low: !!low?.set.has(i) }));
+  if (state.observerSort === 'agreement' && A) people.sort((a, b) => (Number.isFinite(a.score) ? a.score : Infinity) - (Number.isFinite(b.score) ? b.score : Infinity));
+  const both = people.filter(p => p.left >= 0 && p.right >= 0).length;
+  $('observer-count').textContent = `${people.length} people (${both} with both eyes)${removed.size ? `, ${removed.size} recording${removed.size === 1 ? '' : 's'} removed` : ''}`;
+  const score = (v, low, tip) => A ? `<b class="agree${low ? ' low' : ''}" title="${escapeHtml(tip)}">${low ? '⚠ ' : ''}${Number.isFinite(v) ? (Math.abs(v) < 0.005 ? 0 : v).toFixed(2) : '—'}</b>` : '';
+  const eyeRow = (i, side) => {
+    const o = g.observers[i], v = A?.scores[i];
+    return `<div class="observer-row eye-row${A?.low.set.has(i) ? ' flagged' : ''}"><label><input type="checkbox" data-obs="${i}" ${state.observerEnabled[i] ? 'checked' : ''}><i class="eye-mark ${side}" style="--c:${obsColor(i)}"></i><span title="${escapeHtml(o)}">${side === 'L' ? 'left' : 'right'} eye · ${escapeHtml(recName(o, side))}</span><small>${counts[i]}</small>${score(v, A?.low.set.has(i), Number.isFinite(v) ? `This eye's agreement with the other observers of its side: ${v.toFixed(3)}.` : 'No frame with gaze of this eye and the others.')}</label><button class="row-remove" type="button" data-remove="${i}" title="Remove this eye's recording" aria-label="Remove ${escapeHtml(o)}">×</button></div>`;
+  };
+  $('observer-list').innerHTML = people.map(p => {
+    const eyes = [p.left, p.right].filter(i => i >= 0), on = eyes.filter(i => state.observerEnabled[i]).length;
+    const name = personName(g, p), n = eyes.reduce((a, i) => a + counts[i], 0);
+    const tip = Number.isFinite(p.score) ? `Mean of the eyes' agreement scores: ${p.score.toFixed(3)}.` + (p.low ? ` Far below the other people: under ${low.cutoff.toFixed(3)} (box-plot rule). Not removed: use × if you decide to.` : '') : 'No score.';
+    return `<details class="person${p.low ? ' flagged' : ''}" data-person="${p.k}"${state.openPeople?.has(p.k) ? ' open' : ''}><summary class="observer-row person-row"><input type="checkbox" data-person-check="${eyes.join(',')}" ${on === eyes.length ? 'checked' : ''} ${on && on < eyes.length ? 'data-partial' : ''}><i class="eye-mark L" style="--c:${obsColor(eyes[0])}"></i><span title="${escapeHtml(eyes.map(i => g.observers[i]).join(' + '))}">${escapeHtml(name)}${eyes.length < 2 ? ` <em>one eye</em>` : ''}</span><small>${n}</small>${score(p.score, p.low, tip)}<button class="row-remove" type="button" data-remove="${eyes.join(',')}" title="Remove this person (both eyes)" aria-label="Remove ${escapeHtml(name)}">×</button></summary>`
+      + (p.left >= 0 ? eyeRow(p.left, 'L') : '') + (p.right >= 0 ? eyeRow(p.right, 'R') : '') + '</details>';
+  }).join('') + (removed.size ? `<button id="restore-observers" class="link-button" type="button">bring back the ${removed.size} removed</button>` : '');
+  for (const c of $('observer-list').querySelectorAll('[data-partial]')) c.indeterminate = true;
+}
+$('observer-list').addEventListener('toggle', e => { const d = e.target.closest?.('details[data-person]'); if (!d) return; (state.openPeople ||= new Set())[d.open ? 'add' : 'delete'](Number(d.dataset.person)); }, true);
 $('observer-list').addEventListener('click', e => {
   const r = e.target.closest('[data-remove]');
+  if (r && r.dataset.remove.includes(',')) { e.preventDefault(); for (const i of r.dataset.remove.split(',')) (state.removedObservers ||= new Set()).add(state.gaze.observers[Number(i)]); rebuildGaze(); return; }
+  if (r) e.preventDefault();
   if (r) { (state.removedObservers ||= new Set()).add(state.gaze.observers[Number(r.dataset.remove)]); rebuildGaze(); return; }
   if (e.target.id === 'restore-observers') { state.removedObservers = new Set(); rebuildGaze(); }
 });
 function clearGaze(quiet = false) {
   if (!quiet) state.library.gaze = [];
-  Object.assign(state, { files: [], mapping: null, gazeAll: null, gaze: null, observerEnabled: null, conditionEnabled: null, removedObservers: new Set(), loadReport: null });
+  Object.assign(state, { files: [], mapping: null, gazeAll: null, gazeBuilt: null, people: null, gaze: null, observerEnabled: null, conditionEnabled: null, removedObservers: new Set(), loadReport: null });
   $('mapping-section').hidden = true; $('mapping-error').hidden = true;
   renderGroups(); updateGazeSummary(); drawDensity(); updateSubtitle(); updateButtons(); updateExportSummary(); requestRender();
   if (!quiet) notice('Gaze cleared.');
 }
 $('clear-gaze').addEventListener('click', () => clearGaze());
-$('observer-list').addEventListener('change', e => { const i = e.target.dataset.obs; if (i == null) return; state.observerEnabled[i] = e.target.checked ? 1 : 0; drawDensity(); requestRender(); });
+$('observer-list').addEventListener('change', e => {
+  const both = e.target.dataset.personCheck;
+  if (both != null) { for (const i of both.split(',')) state.observerEnabled[Number(i)] = e.target.checked ? 1 : 0; renderGroups(); drawDensity(); requestRender(); return; }
+  const i = e.target.dataset.obs; if (i == null) return; state.observerEnabled[i] = e.target.checked ? 1 : 0;
+  if (state.people) renderGroups();
+  drawDensity(); requestRender();
+});
 $('condition-list').addEventListener('change', e => { const i = e.target.dataset.cond; if (i == null) return; state.conditionEnabled[i] = e.target.checked ? 1 : 0; drawDensity(); requestRender(); });
 // ---------- observer agreement (a flag, never a filter) ----------
 const AGREE_W = 128, AGREE_H = 64, AGREE_MAX_FRAMES = 400;
@@ -1434,10 +1488,11 @@ function gazeProcessingJson() {
     min_fixation_duration_ms: s.minDurationMs || 0, rows_removed_by_min_duration: g.durationRemoved || 0,
     speed_filter_deg_per_s: s.velocity || 0, rows_removed_by_speed_filter: g.filtered || 0,
     removed_observers: [...(state.removedObservers || [])],
+    observers_switched_off: state.observerEnabled ? g.observers.filter((o, i) => !state.observerEnabled[i]) : [],
     eye_pairing: { setting: s.eyePairing, ...(state.people ? {
       method: state.people.method === 'names' ? 'partners from shared names' : 'matching: share of one eye\'s fixations with a fixation of the other starting within 60 ms and within 3°, best one-to-one assignment, pairs below 0.1 dropped',
       sides_from: state.people.sidesFrom, pairs: state.people.pairs, single_left: state.people.singleLeft, single_right: state.people.singleRight,
-      people: state.people.people.map(p => ({ left: p.left >= 0 ? all.observers[p.left] : null, right: p.right >= 0 ? all.observers[p.right] : null, match: p.score == null ? null : +p.score.toFixed(3) }))
+      people: state.people.people.map(p => ({ left: p.left >= 0 ? state.gazeBuilt.observers[p.left] : null, right: p.right >= 0 ? state.gazeBuilt.observers[p.right] : null, match: p.score == null ? null : +p.score.toFixed(3) }))
     } : { pairs: 0 }) },
     observer_agreement: A ? {
       method: 'per frame, the correlation between one observer\'s map and the summed map of all the other observers of the same condition (leave-one-out), each pixel weighted by its area on the sphere for 360° video; averaged over the frames where both have gaze. The current saliency settings shape the maps.',
@@ -1447,6 +1502,7 @@ function gazeProcessingJson() {
       scores: Object.fromEntries(g.observers.map((o, i) => [o, Number.isFinite(A.scores[i]) ? +A.scores[i].toFixed(4) : null])),
       frames_scored: Object.fromEntries(g.observers.map((o, i) => [o, A.frames[i]])),
       low: [...A.low.set].map(i => g.observers[i]),
+      ...(state.people ? { person_scores: Object.fromEntries(peopleNow().map(p => [personName(g, p), +(personScore(A, p) || 0).toFixed(4)])), person_score_rule: 'a person\'s score is the mean of their eyes\' scores' } : {}),
       note: 'a flag only: nobody is removed automatically'
     } : null
   };
