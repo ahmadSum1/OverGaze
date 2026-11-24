@@ -735,3 +735,21 @@ test('motion analysis uses OpenCV Farnebäck (loaded from vendor/ when needed) w
     assert.deepEqual(b.logs, []);
   } finally { b.close(); server.close(); }
 });
+
+test('while playing, the live map takes the fast path; paused, it is drawn exactly as the export draws it', opts, async () => {
+  const { server, url } = await serve(), b = await launch();
+  try {
+    await b.goto(url + '?sample=eyes');
+    await b.waitFor('!!overgaze.state.gaze && document.querySelector("#video").readyState >= 2', 20000);
+    await b.eval(`overgaze.applySettings({ windowSec: 1, kernel: 'gaussian' }); document.querySelector('#video').currentTime = 2; document.querySelector('#video').play(); 1`);
+    await new Promise(r => setTimeout(r, 2500));
+    const playing = await b.eval('[overgaze.state.frameTimes.length, document.querySelector("#ro-ms").textContent]');
+    assert.ok(playing[0] > 10, `frames drawn while playing (${playing[0]})`);
+    await b.eval(`document.querySelector('#video').pause(); 1`); await new Promise(r => setTimeout(r, 600));
+    // paused: drawn at the full live width, on the exact path (the fast path is only used while playing; exports
+    // never use it: their worker does not get the fast option, and the export test checks its maps)
+    assert.equal(await b.eval('document.querySelector("#heat-canvas").width'), await b.eval('overgaze.state.display.mapWidth'));
+    assert.doesNotMatch(await b.eval('document.querySelector("#ro-ms").textContent'), /half width/, 'full width when paused');
+    assert.deepEqual(b.logs, []);
+  } finally { b.close(); server.close(); }
+});

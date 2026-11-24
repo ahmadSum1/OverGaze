@@ -381,14 +381,29 @@ function requestRender() {
   requestAnimationFrame(() => { state.renderQueued = false; render(); });
 }
 
+/** One frame of the live view; the readout gives the time of the whole frame and of the map in it. */
 function render() {
+  const t0 = performance.now();
+  renderFrame();
+  if (state.gaze && state.lastMapMs != null) {
+    const total = performance.now() - t0;
+    state.frameTimes = [...(state.frameTimes || []).slice(-29), total];
+    $('ro-ms').textContent = `${total.toFixed(1)} ms per frame (map ${state.lastMapMs.toFixed(1)} ms${state.lastMapReduced ? ', half width while playing' : ''})`;
+  }
+}
+function renderFrame() {
   if (!state.video || !video.videoWidth) return;
   const [k, t] = currentFrame();
   $('time-label').textContent = `${fmt(video.paused ? video.currentTime : state.mediaTime, 3)} s · frame ${k}`;
   if (document.activeElement !== $('scrubber')) $('scrubber').value = String(video.paused ? video.currentTime : state.mediaTime);
   if (converting()) frameImage();
   const [vw, vh] = videoSize();
-  const [W, H] = mapSize(state.display.mapWidth, state.settings, vw, vh);
+  // while playing: a faster map (the Gaussian from a table, points moved on from the previous frame) and, if a frame
+  // still takes over 25 ms, half the width (at least 256); paused, the map is drawn exactly as the export draws it
+  const playing = !video.paused && !video.ended;
+  if (!playing) state.playReduced = false;
+  const liveWidth = playing && state.playReduced ? Math.max(256, state.display.mapWidth / 2) : state.display.mapWidth;
+  const [W, H] = mapSize(liveWidth, state.settings, vw, vh);
   if (heatCanvas.width !== W || heatCanvas.height !== H) { heatCanvas.width = W; heatCanvas.height = H; }
   const hctx = heatCanvas.getContext('2d');
   const thr = state.settings.coverageThreshold;
@@ -399,8 +414,10 @@ function render() {
   img.data.fill(0);
   if (state.gaze) {
     const t0 = performance.now();
-    result = renderMap(state.gaze, t, settingsForRender('max'), W, H, renderContext(), state.work);
+    const ctx = playing ? { ...renderContext(), fast: true, moveCache: (state.moveCache ||= {}) } : renderContext();
+    result = renderMap(state.gaze, t, settingsForRender('max'), W, H, ctx, state.work);
     const ms = performance.now() - t0;
+    if (playing && ms > 25 && W > 256) state.playReduced = true;
     const cov = coverage(result.map, W, H, thr, state.settings.projection === 'erp');
     const observers = new Set();
     for (let i = 0; i < result.points.n; i++) observers.add(result.points.obs[i]);
@@ -408,7 +425,7 @@ function render() {
     $('ro-observers').textContent = `${observers.size} / ${state.observerEnabled ? state.observerEnabled.reduce((a, b) => a + b, 0) : 0}`;
     $('ro-coverage').textContent = result.max > 0 ? `${pct(cov.pixels)} / ${pct(cov.sphere)}` : '—';
     $('ro-map').textContent = `${W} × ${H}`;
-    $('ro-ms').textContent = `${ms.toFixed(1)} ms per frame`;
+    state.lastMapMs = ms; state.lastMapReduced = playing && state.playReduced && W < mapSize(state.display.mapWidth, state.settings, vw, vh)[0];
     $('readout-badge').hidden = false;
     $('readout-badge').textContent = `σ ${state.settings.sigmaDeg}° · ±${state.settings.windowSec} s${state.settings.causal ? ' past' : ''}${state.settings.motionComp && state.flow ? ' · motion-comp.' : ''}${state.settings.memoryWeight > 0 ? ` · memory ${state.settings.memoryWeight}` : ''}`;
   }
