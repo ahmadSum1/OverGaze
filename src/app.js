@@ -799,6 +799,7 @@ function applyPoints(o = {}) {
   if ('join_eyes' in o) P.eyeLines = !!o.join_eyes;
   if ('motion_lines' in o) P.motionLines = !!o.motion_lines;
   if ('legend' in o) P.legend = !!o.legend;
+  updatePointsLegend();
   $('point-size').value = String(P.size); $('point-dwell').checked = P.dwell; $('point-dwell-cap').value = String(P.dwellCap); $('point-eye-lines').checked = P.eyeLines; $('point-motion-lines').checked = P.motionLines; $('point-legend').checked = P.legend;
   requestRender();
 }
