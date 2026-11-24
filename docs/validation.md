@@ -66,7 +66,40 @@ The motion field that OverGaze used at 16_Turtle frame 435 (frames 434 → 437, 
 
 With no movement at all, the difference is 2.66. On frames moved by a known 1–6 px the median error was 0.06 px (DIS), 0.26 px (before the fix) and 0.11 px (after); on the bundled sample's known camera pan 0.12, 0.27 and 0.15 px. On 6_DroneFlight (moving camera) the fixed estimate calls 6.9 % of the pixels that DIS sees moving more than 1 px still.
 
-**Conclusion.** The fixed built-in estimate no longer invents movement in still areas and is as good as DIS there, but on moving texture such as surf it is still about 1.3 px from DIS on average. For analysis, use OpenCV motion files. On 16_Turtle frame 440, motion compensation with the fixed estimate keeps 67.6 % of the dataset map, against 95.2 % with DIS.
+**Conclusion (round 1).** The fixed built-in estimate no longer invents movement in still areas and is as good as DIS there, but on moving texture such as surf it is still about 1.3 px from DIS on average. On 16_Turtle frame 440, motion compensation with the fixed estimate keeps 67.6 % of the dataset map, against 95.2 % with DIS.
+
+### Round 2: OpenCV Farnebäck in the browser, with checks
+
+On a fixed-camera YT360 clip (Lc5xpQBDWyg-69 at 72 s) the built-in estimate still drew long arrows in the sky. OpenCV.js 4.10 (served from the repository, loaded when "Analyse motion" is pressed) provides Farnebäck's method; DIS is not in OpenCV.js. Three checks were added to the estimate in the browser: the motion back from the second frame must cancel the motion forward (else 0); textured patches (5 × 5, mean step to the next pixel above 8 of 255) that changed by less than 3 of 255 get no motion; rows beyond ±70° latitude take the horizontal motion of the last trusted row. Compared on three clips (frames decoded by OpenCV at 256 × 128, 0.1 s apart; known shifts: 15 frames of each clip moved by 1–6 px across and up to 2 px down, with noise):
+
+| estimate | still pixels, 16_Turtle (median / 95th percentile, px) | still pixels, Lc5xpQBDWyg-69 | still pixels, 6_DroneFlight (moving camera) | known shifts, 16_Turtle (error, px: whole frame / between ±70°) | known shifts, Lc5xpQBDWyg-69 | known shifts, 6_DroneFlight | computing per minute of video (10 fields per second, one core) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| built-in before the first fix | 0.09 / 1.95 | 0.06 / 0.69 | 0.63 / 3.67 | 0.20 / 0.20 | 0.27 / 0.24 | 0.33 / 0.34 | 43 s |
+| built-in | 0.04 / 0.84 | 0.02 / 0.30 | 0.42 / 2.43 | 0.10 / 0.10 | 0.13 / 0.12 | 0.14 / 0.13 | 86 s |
+| built-in + checks | 0.00 / 0.28 | 0.00 / 0.11 | 0.20 / 1.54 | 0.11 / 0.10 | 0.14 / 0.12 | 0.16 / 0.13 | 176 s |
+| Farnebäck | 0.02 / 0.60 | 0.02 / 0.13 | 0.02 / 0.74 | 0.06 / 0.06 | 0.05 / 0.05 | 0.08 / 0.07 | 15 s |
+| Farnebäck + checks (now the default) | 0.00 / 0.37 | 0.00 / 0.07 | 0.00 / 0.67 | 0.08 / 0.06 | 0.05 / 0.05 | 0.66 / 0.07 | 29 s |
+| OpenCV DIS (motion file) | 0.03 / 0.46 | 0.02 / 0.14 | 0.38 / 1.62 | 0.06 / 0.06 | 0.07 / 0.06 | 0.07 / 0.07 | — |
+
+Whole analysis in the browser on 16_Turtle (20 s, 4K): with "seek" grabbing about 8.6 minutes per minute of video for every estimate (seeking in the 4K video takes most of the time); with "play" grabbing it runs at the speed of the video, and Farnebäck with checks kept up (195 of 200 fields) while the built-in estimate with checks did not (73 of 200). OpenCV.js took under a second to start once loaded. The DIS tool (`tools/motion_opencv.py`) took 6.2 s for the 20 s clip, including decoding. Still pixels = pixels whose brightness changed by at most 1 of 255 between the two frames; on the moving-camera clip some of them really move (flat areas), which is why DIS shows motion there. The checks set textured still pixels to 0 by design, so their still-pixel numbers are not a fair contest; the known shifts are. The larger whole-frame error of "Farnebäck + checks" on 6_DroneFlight comes from the pole rows: a uniform shift downwards is not a motion a 360° camera makes near the poles, and those rows get no vertical motion.
+
+**Salient360 scores with the new browser estimate** (1887 frames, held out as in section 2; motion files made by running the browser code outside the browser on the frames OpenCV decoded):
+
+| map | kept | held-out hit rate | AUC-Judd | shuffled AUC, within video | shuffled AUC, across videos | NSS |
+|---|---:|---:|---:|---:|---:|---:|
+| pooled ±1 s | 0.580 | 0.356 | 0.807 | 0.574 | 0.730 | 3.29 |
+| pooled ±1 s + motion (OpenCV DIS file) | 0.578 | 0.362 | 0.810 | 0.575 | 0.732 | 3.30 |
+| pooled ±1 s + motion (browser Farnebäck with checks) | 0.575 | 0.362 | 0.810 | 0.576 | 0.732 | 3.30 |
+
+| measure | Farnebäck − DIS, mean per video | videos better / worse | interval above 0 / below 0 | sign test p |
+|---|---:|---:|---:|---:|
+| held-out hit rate | -0.0006 | 11 / 8 | 4 / 3 | 0.648 |
+| AUC-Judd | +0.0000 | 9 / 10 | 2 / 2 | 1.000 |
+| shuffled AUC, within video | +0.0004 | 15 / 4 | 3 / 1 | 0.019 |
+| shuffled AUC, across videos | +0.0003 | 13 / 6 | 2 / 1 | 0.167 |
+| NSS | +0.0012 | 10 / 9 | 2 / 2 | 1.000 |
+
+**Conclusion (round 2).** Farnebäck in the browser, with the checks, is now the default estimate. Its errors on known shifts (0.05–0.08 px away from the poles) match DIS (0.06–0.07), it barely moves still pixels, it keeps up with real-time playback, and the Salient360 scores with it equal those with DIS motion files to three decimals (the DIS row reproduces section 4). On 16_Turtle frame 440 it keeps 89.2 % of the dataset map (DIS 95.2 %, no motion 90.4 %, built-in 67.6 %). Its weaknesses: flat, heavily compressed areas under a turning camera (the bundled sample's ground) get too little motion, and small fast objects are followed less closely, because its window is 15 pixels wide: on the bundled sample's ball it is 0.81 px off per field (built-in 0.23 px; a 9-pixel window 0.12 px, but then known shifts on 6_DroneFlight get worse, 0.11 against 0.07). Motion compensation shrinks the sample's pooled map to 0.64 of its size with it (the built-in estimate: under 0.6).
 
 ## 4. Pooling, motion and a learned predictor (report 3)
 

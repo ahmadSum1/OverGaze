@@ -218,6 +218,8 @@
           <label>Flow samples / s<select id="flow-rate"><option value="5">5</option><option value="10" selected>10</option><option value="15">15</option><option value="30">30</option></select></label>
           <label>Flow resolution<select id="flow-width"><option value="128">128 × 64</option><option value="256" selected>256 × 128</option><option value="512">512 × 256</option></select></label>
           <label>Frame grabbing<select id="flow-method"><option value="play">play (fast)</option><option value="seek">seek (exact)</option></select></label>
+          <label>Estimate<select id="flow-estimate"><option value="farneback">OpenCV Farnebäck</option><option value="builtin">built-in</option></select></label>
+          <label class="view-switch grid-span"><span>Checks (still areas, both directions, poles)</span><input id="flow-checks" type="checkbox" role="switch" checked><span class="switch-track" aria-hidden="true"></span></label>
           <label>Range<select id="flow-range"><option value="all">whole video</option><option value="export">export range</option><option value="gaze">gaze range</option></select></label>
         </div>
         <div class="button-row"><button id="analyse" class="button button-outline" type="button" disabled>Analyse motion</button><button id="clear-flow" class="button button-outline" type="button" disabled>Clear</button></div>
@@ -227,6 +229,7 @@
         <p id="flow-status" class="hint">Not analysed.</p>
         <label class="view-switch"><span>Use motion compensation</span><input id="motion" type="checkbox" role="switch" disabled><span class="switch-track" aria-hidden="true"></span></label>
         <label class="view-switch"><span>Show flow vectors</span><input id="show-flow" type="checkbox" role="switch" disabled><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="view-switch"><span>Only near the gaze points of the pooling window (where the motion is used)</span><input id="flow-near-gaze" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
       </div>
 
       <div class="settings-section"><div class="section-title"><span class="section-icon">⟲</span> Gaze processing <span class="section-number">04</span></div>

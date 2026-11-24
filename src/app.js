@@ -714,7 +714,19 @@ function drawMarks(t, result) {
   if (state.display.showFlow && state.flow) {
     const f = state.flow, stepPx = 26 * dpr, scale = 0.5; // arrow = displacement over 0.5 s
     g.strokeStyle = 'rgba(200,245,106,0.85)'; g.lineWidth = 1.2 * dpr;
+    // only near the gaze points: grid cells within about one cell of a point, where it was recorded or moved to
+    let near = null;
+    if (state.display.flowNearGaze && state.gaze) {
+      near = new Set();
+      const nx = Math.ceil(cw / stepPx), ny = Math.ceil(ch / stepPx), TAUm = Math.PI * 2;
+      for (const m of collectMarks(state.gaze, t, settingsForRender(), renderContext())) for (const [lo, la] of [[m.lon, m.lat], [m.lon0, m.lat0]]) {
+        const cx = Math.floor((lo / TAUm + 0.5) * cw / stepPx), cy = Math.floor((0.5 - la / Math.PI) * ch / stepPx);
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const yy = cy + dy; if (yy >= 0 && yy < ny) near.add(yy * nx + ((cx + dx + nx) % nx)); }
+      }
+      near.nx = nx;
+    }
     for (let y = stepPx / 2; y < ch; y += stepPx) for (let x = stepPx / 2; x < cw; x += stepPx) {
+      if (near && !near.has(Math.floor(y / stepPx) * near.nx + Math.floor(x / stepPx))) continue;
       const fx = x / cw * f.W - 0.5, fy = y / ch * f.H - 0.5;
       const [u, v] = f.velocity(t, fx, fy);
       const dx = u * scale * cw / f.W, dy = v * scale * ch / f.H;
@@ -1316,13 +1328,23 @@ async function analyseMotion() {
   const submit = (A, B, tA, tB) => new Promise(resolve => {
     const id = ++seq;
     pending.set(id, msg => { if (msg.error) failures++; else store.add(tA, tB, msg.u, msg.v); resolve(); });
-    worker.postMessage({ id, a: A, b: B, W, H, wrap });
+    worker.postMessage({ id, a: A, b: B, W, H, wrap, estimate, checks });
   });
+  let estimate = $('flow-estimate').value;
+  const checks = $('flow-checks').checked;
   const conv = converting() ? grabConverter() : null, [rw, rh] = rawVideoSize(), layout = state.layout;
   const grab = () => { g.drawImage(conv ? conv.convert(probe, layout, rw, rh, W, H) : probe, 0, 0, W, H); return toGray(g.getImageData(0, 0, W, H).data, W, H); };
   const started = performance.now();
   try {
-    await once(probe, 'loadeddata', 15000);
+    if (estimate === 'farneback') {
+      // OpenCV.js (about 10 MB, from this site's vendor folder) is loaded only now, the first time it is needed
+      setStatus('Loading OpenCV.js for the Farnebäck estimate…');
+      const t0 = performance.now();
+      const ok = await new Promise(resolve => { const id = ++seq; pending.set(id, msg => resolve(!msg.error && msg.loaded)); worker.postMessage({ id, load: true }); });
+      if (!ok) { estimate = 'builtin'; notice('OpenCV.js could not be loaded, so the built-in estimate is used for this analysis.', true); }
+      else state.cvLoadSeconds = (performance.now() - t0) / 1000;
+    }
+    if (probe.readyState < 2) await once(probe, 'loadeddata', 15000);
     let prev = null, prevT = 0;
     const inflight = [];
     const push = async (img, t) => {
@@ -1364,7 +1386,7 @@ async function analyseMotion() {
     while (pending.size) await new Promise(r => setTimeout(r, 20));
     if (store.size) {
       state.flow = store;
-      state.flowInfo = { rate, method: $('flow-method').value, from: a, to: b, seconds: (performance.now() - started) / 1000, failures };
+      state.flowInfo = { rate, method: $('flow-method').value, estimate, checks, from: a, to: b, seconds: (performance.now() - started) / 1000, failures };
     }
     setStatus(job.cancel ? 'Motion analysis cancelled' : `Motion analysed in ${fmt((performance.now() - started) / 1000, 1)} s`);
     if (store.size && !job.cancel) { $('motion').checked = true; state.settings.motionComp = true; }
@@ -1397,6 +1419,7 @@ $('duration-weight').addEventListener('change', e => { state.settings.durationWe
 $('fps').addEventListener('change', e => { const f = Number(e.target.value); if (f > 0) { setFps(f, 'manual'); if (/^frame/.test(state.mapping?.timeUnit) || /^frame/.test(state.mapping?.durationUnit)) rebuildGaze(); } });
 $('motion').addEventListener('change', e => { state.settings.motionComp = e.target.checked; state.wantMotion = e.target.checked; onSettings(); });
 $('show-flow').addEventListener('change', e => { state.display.showFlow = e.target.checked; requestRender(); });
+$('flow-near-gaze').addEventListener('change', e => { state.display.flowNearGaze = e.target.checked; if (e.target.checked && state.flow) { state.display.showFlow = true; $('show-flow').checked = true; } requestRender(); });
 $('vel').addEventListener('change', e => { state.settings.velocity = Math.max(0, Number(e.target.value) || 0); applyGazeFilters(); onSettings(); });
 $('min-dur').addEventListener('change', e => { state.settings.minDurationMs = Math.max(0, Number(e.target.value) || 0); e.target.value = String(state.settings.minDurationMs); applyGazeFilters(); onSettings(); });
 $('flip-x').addEventListener('change', e => { state.settings.flipX = e.target.checked; onSettings(); });
@@ -1639,7 +1662,7 @@ function settingsJson(extra = {}) {
       observers_used: g.observers.filter((_, i) => state.observerEnabled[i]), conditions_used: g.conditions.filter((_, i) => state.conditionEnabled[i]),
       column_mapping: state.mapping
     } : null,
-    display: { gaze_points: pointsJson(), memory_outline: { show: state.memoryOutline.show, colour: state.memoryOutline.color, area: 'salient (≥ coverage threshold × maximum) with memory, not salient in the pooled map alone' } },
+    display: { flow_vectors: { show: !!state.display.showFlow, only_near_gaze: !!state.display.flowNearGaze }, gaze_points: pointsJson(), memory_outline: { show: state.memoryOutline.show, colour: state.memoryOutline.color, area: 'salient (≥ coverage threshold × maximum) with memory, not salient in the pooled map alone' } },
     saliency: {
       projection: s.projection, sigma_deg: s.sigmaDeg, kernel_cutoff_sigma: s.truncate, planar_fov_deg: s.projection === 'planar' ? s.planarFovDeg : undefined,
       pooling_window_s: s.windowSec, pooling_weight: s.kernel, peaked_tau_s: s.kernel === 'peaked' ? (s.peakTauSec ?? 0.25) : undefined, scene_memory_weight: s.memoryWeight || 0, scene_memory: s.memoryWeight > 0 ? 'map = pooled map ÷ its maximum + w × memory map ÷ its maximum, then ÷ the maximum; memory = every fixation (weighted by its frames so far) or gaze sample from the clip start to this frame, moved along the motion to this frame' + (state.flow ? '' : ' (no motion: not moved)') : undefined, causal: s.causal, weight_by_duration: s.durationWeight,
@@ -1650,7 +1673,7 @@ function settingsJson(extra = {}) {
     },
     gaze_processing: g ? gazeProcessingJson() : { min_fixation_duration_ms: s.minDurationMs || 0, speed_filter_deg_per_s: s.velocity || 0, drop_row_rules: state.rowRules.map(r => ({ all_of: r.clauses })) },
     motion: s.motionComp && state.flow ? { flow_width: state.flow.W, flow_height: state.flow.H, fields: state.flow.size, step_s: state.flow.step, ...state.flowInfo,
-      method_note: (state.flowInfo?.method === 'file' ? `loaded from ${state.flowInfo.file}: ${state.flowInfo.about || 'no method given'}` : 'pyramidal Lucas-Kanade on greyscale frames (each pixel then keeps its own movement, none, or a neighbour\'s, whichever matches the next frame best), wrap-around at the left/right edge for 360° video')
+      method_note: (state.flowInfo?.method === 'file' ? `loaded from ${state.flowInfo.file}: ${state.flowInfo.about || 'no method given'}` : (state.flowInfo?.estimate === 'farneback' ? 'OpenCV.js Farnebäck on greyscale frames (pyramid scale 0.5, 4 levels, window 15, 3 iterations, polynomial size 5, sigma 1.1), padded with the other side for 360° video' : 'built-in pyramidal Lucas-Kanade on greyscale frames (each pixel then keeps its own movement, none, or a neighbour\'s, whichever matches the next frame best), wrap-around at the left/right edge for 360° video') + (state.flowInfo?.checks ? '; checks: motion 0 where the motion back does not cancel the motion forward (more than 0.75 px + 10 %), motion 0 in textured patches (5 × 5, mean step to the next pixel above 8 of 255) that changed by less than 3 of 255, rows beyond ±70° latitude take the horizontal motion of the last trusted row' : ''))
         + '; each pooled point is moved along the flow from its own time to the frame time' } : null,
     ...extra
   };

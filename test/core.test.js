@@ -626,3 +626,40 @@ test('the original of a downloaded video, from its file name', () => {
   // a full download plays on the original's clock; a file cut at the clip start is shifted by it
   assert.equal(originalTime(a, 320, 3395), 320); assert.equal(originalTime(a, 5, 30), 320);
 });
+
+// ---------- motion checks and Farnebäck (OpenCV.js) ----------
+import { stillAreas, forwardBackward, poleBands } from '../src/flowchecks.js';
+import { farneback } from '../src/flow-cv.js';
+
+test('motion checks: textured patches that did not change get no motion, flat ones keep theirs; forward and backward must cancel; pole rows take the last trusted row', () => {
+  const W = 32, H = 16, A = new Float32Array(W * H), B = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const tex = x < 16 ? ((x * 7 + y * 13) % 5) / 10 : 0.5; A[y * W + x] = tex; B[y * W + x] = tex; }
+  let u = new Float32Array(W * H).fill(2), v = new Float32Array(W * H).fill(1);
+  stillAreas(A, B, W, H, u, v, { wrap: false });
+  assert.equal(u[8 * W + 8], 0, 'textured and unchanged: no motion'); assert.equal(u[8 * W + 28], 2, 'flat: motion kept');
+  u = new Float32Array(W * H).fill(2); v = new Float32Array(W * H);
+  const ub = new Float32Array(W * H).fill(-2), vb = new Float32Array(W * H);
+  ub[8 * W + 12] = 3;   // the motion back from where pixel (10, 8) lands disagrees
+  forwardBackward(u, v, ub, vb, W, H, { wrap: false });
+  assert.equal(u[8 * W + 10], 0); assert.equal(u[8 * W + 4], 2);
+  const pu = Float32Array.from({ length: W * H }, (_, i) => Math.floor(i / W)), pv = new Float32Array(W * H).fill(1);
+  poleBands(pu, pv, W, H, { poleDeg: 70 });
+  assert.equal(pu[0], 1, 'top row takes row 1'); assert.equal(pv[0], 0); assert.equal(pu[(H - 1) * W], H - 2); assert.equal(pu[5 * W], 5, 'middle rows untouched');
+});
+
+test('Farnebäck (OpenCV.js from vendor/) finds a known shift across the left/right edge and no motion on a still background', async () => {
+  const code = (await import('node:fs')).readFileSync(new URL('../vendor/opencv/opencv.js', import.meta.url), 'utf8');
+  const mod = { exports: {} };
+  const { createRequire } = await import('node:module'), path = new URL('../vendor/opencv/opencv.js', import.meta.url).pathname;
+  new Function('module', 'exports', 'define', 'require', '__dirname', '__filename', code)(mod, mod.exports, undefined, createRequire(path), path.replace(/\/[^/]*$/, ''), path);
+  const cv = await new Promise(r => mod.exports.then(c => { delete c.then; r(c); }));
+  const W = 128, H = 64, a = new Float32Array(W * H), b = new Float32Array(W * H);
+  const f = (x, y) => 0.5 + 0.25 * Math.sin(x * 2 * Math.PI / W * 5) * Math.cos(y * 0.3) + 0.2 * Math.sin((x * 2 * Math.PI / W) * 3 + y * 0.17);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { a[y * W + x] = f(x, y); b[y * W + x] = f(x - 3, y); }
+  const { u, v } = farneback(cv, a, b, W, H, true);
+  let su = 0, n = 0; for (let y = 10; y < H - 10; y++) for (const x of [0, 1, 2, 60, 125, 126, 127]) { su += u[y * W + x]; n++; }
+  close(su / n, 3, 0.3, 'shift found, also at the left and right edges');
+  const still = farneback(cv, a, a, W, H, true);
+  const mx = Math.max(...still.u.map(Math.abs), ...still.v.map(Math.abs));
+  assert.ok(mx < 0.1, `(almost) no motion between identical frames (largest ${mx})`);
+});

@@ -116,3 +116,4 @@ input[type=range]{accent-color:var(--lime);width:100%}
 .more>summary{cursor:pointer;color:var(--muted);font-size:11px;margin:4px 0}.more[open]>summary{color:var(--lime)}.more{margin:2px 0 6px}.eye-mark{width:9px;height:9px;border-radius:50%;flex:none;background:var(--c)}.eye-mark.R{border-radius:1px}
 .eye-row>label span{min-width:0}
 #video-original{color:var(--lime);text-decoration:none}#video-original:hover{text-decoration:underline}
+.grid2 .grid-span{grid-column:1/-1}
