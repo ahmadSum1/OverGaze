@@ -53,7 +53,9 @@ test('motion compensation pulls the pooled map back onto the moving ball; export
     await b.waitFor('!!overgaze.state.flow', 120000, 'motion analysis');
     assert.equal(await b.eval('overgaze.state.settings.motionComp'), true, 'switched on after the analysis');
     const compensated = await covOf();
-    assert.ok(compensated < 0.6 * smeared, `coverage ${smeared} without vs ${compensated} with motion compensation`);
+    // Farnebäck's 15-pixel window follows the sample's small fast ball less closely than the built-in estimate did
+    // (about 0.8 px off per field; see docs/validation.md, section 3), so the map shrinks less than before (0.64× here)
+    assert.ok(compensated < 0.75 * smeared, `coverage ${smeared} without vs ${compensated} with motion compensation`);
 
     await b.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: dir });
     await b.eval(`for (const [id, v] of [['ex-start','2'],['ex-end','2.2'],['ex-width','256'],['ex-format','npyf4'],['ex-norm','none']]) { const e = document.querySelector('#'+id); e.value = v; e.dispatchEvent(new Event('change')); } 1`);
@@ -702,5 +704,34 @@ test('a video named after its YouTube original gets a link to it, at the moment 
     assert.equal(await b.eval('document.querySelector("#video-original").href'), 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=13');
     assert.equal(await b.eval('document.querySelector("#video-original").target'), '_blank');
     assert.equal((await b.eval('overgaze.settingsJson().video.original')).id, 'dQw4w9WgXcQ');
+  } finally { b.close(); server.close(); }
+});
+
+test('motion analysis uses OpenCV Farnebäck (loaded from lib/ when needed) with the checks; flow arrows can be limited to the gaze points', opts, async () => {
+  const { server, url } = await serve(), b = await launch();
+  try {
+    await b.goto(url + '?sample');
+    await b.waitFor('!!overgaze.state.gaze && document.querySelector("#video").readyState >= 2', 20000);
+    assert.equal(await b.eval('typeof cv'), 'undefined', 'OpenCV.js is not loaded before it is needed');
+    await b.eval(`(e => { e.value = 'seek'; e.dispatchEvent(new Event('change')); return 1; })(document.querySelector('#flow-method'))`);
+    await b.click('#analyse');
+    await b.waitFor('!!overgaze.state.flow && !overgaze.state.analysing', 120000, 'motion');
+    const info = await b.eval('overgaze.state.flowInfo');
+    assert.equal(info.estimate, 'farneback'); assert.equal(info.checks, true); assert.equal(info.failures, 0);
+    // the sample's camera pans at −20°/s: about −14 px/s at 256 px wide
+    const pan = await b.eval('overgaze.state.flow.velocity(4, 40, 62)[0]');
+    assert.ok(pan < -10 && pan > -18, `camera pan found (${pan.toFixed(1)} px/s)`);
+    assert.match(await b.eval('overgaze.settingsJson({}).motion?.method_note || ""'), /^$|Farnebäck/);
+    // arrows: count the drawn lines with and without "only near the gaze points"
+    await b.eval(`(() => { window.__arrows = 0; const P = CanvasRenderingContext2D.prototype, mt = P.moveTo; P.moveTo = function (...a) { if (this.canvas.id === 'marks-canvas') window.__arrows++; return mt.apply(this, a); }; return 1; })()`);
+    await b.eval(`overgaze.applySettings({ windowSec: 1, kernel: 'gaussian' }); (e => { e.checked = true; e.dispatchEvent(new Event('change')); return 1; })(document.querySelector('#show-flow')); document.querySelector('#points-more').open = false; 1`);
+    await b.eval(`(e => { e.checked = false; e.dispatchEvent(new Event('change')); return 1; })(document.querySelector('#point-motion-lines'))`);
+    await b.eval(`window.__arrows = 0; document.querySelector('#video').currentTime = 4; 1`); await new Promise(r => setTimeout(r, 800));
+    const all = await b.eval('window.__arrows');
+    await b.eval(`(e => { e.checked = true; e.dispatchEvent(new Event('change')); return 1; })(document.querySelector('#flow-near-gaze')); window.__arrows = 0; document.querySelector('#video').currentTime = 4.01; 1`); await new Promise(r => setTimeout(r, 800));
+    const near = await b.eval('window.__arrows');
+    assert.ok(near > 0 && near < all / 3, `fewer arrows, near the gaze only (${all} → ${near})`);
+    assert.deepEqual(await b.eval('overgaze.settingsJson().display.flow_vectors'), { show: true, only_near_gaze: true });
+    assert.deepEqual(b.logs, []);
   } finally { b.close(); server.close(); }
 });
