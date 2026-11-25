@@ -630,3 +630,34 @@ test('scene memory: weight w adds the places looked at since the clip started; t
     assert.deepEqual(b.logs, []);
   } finally { b.close(); server.close(); }
 });
+
+test('motion range: export range and the new gaze range are analysed, and a video much longer than the gaze defaults both ranges to the gaze range', opts, async () => {
+  const { server, url } = await serve(), b = await launch();
+  const dir = mkdtempSync(join(tmpdir(), 'overgaze-range-'));
+  try {
+    await b.goto(url + '?sample');
+    await b.waitFor('!!overgaze.state.gaze && document.querySelector("#video").readyState >= 2', 20000);
+    const analyse = async (range, setup = '') => {
+      await b.eval(`${setup} for (const [id, v] of [['flow-range', '${range}'], ['flow-method', 'seek']]) { const e = document.querySelector('#' + id); e.value = v; e.dispatchEvent(new Event('change')); } overgaze.state.flow = null; 1`);
+      await b.click('#analyse'); await b.waitFor('!!overgaze.state.flow && !overgaze.state.analysing', 60000, 'motion');
+      return b.eval('[overgaze.state.flowInfo.from, overgaze.state.flowInfo.to, overgaze.state.flow.times[0], overgaze.state.flow.times.at(-1)]');
+    };
+    const [a, bb, first, last] = await analyse('export', "document.querySelector('#ex-start').value = '2'; document.querySelector('#ex-end').value = '4';");
+    assert.deepEqual([a, bb], [2, 4]); assert.ok(first > 2 && last < 4, `fields inside the export range (${first}–${last})`);
+    // gaze range: gaze from 2.5 s to 5.0 s, pooling window 0.5 s → 2.0–5.5 s
+    writeFileSync(join(dir, 'g.csv'), 'user,start_time,duration,longitude,latitude\n1,2.5,0.3,0,0\n2,4.7,0.3,10,0\n');
+    await b.click('#clear-gaze');
+    await b.setFiles('#gaze-input', [join(dir, 'g.csv')]);
+    await b.waitFor('overgaze.state.gaze?.n === 2', 10000, 'gaze');
+    await b.eval(`overgaze.applySettings({ windowSec: 0.5 }); 1`);
+    const [ga, gb] = await analyse('gaze');
+    assert.ok(Math.abs(ga - 2.0) < 1e-6 && Math.abs(gb - 5.5) < 1e-6, `gaze range ${ga}–${gb}`);
+    // a video four times longer than the gaze: both ranges start at the gaze range
+    spawnSync('ffmpeg', ['-loglevel', 'error', '-y', '-stream_loop', '3', '-i', join(ROOT, 'sample', 'sample_erp.mp4'), '-c', 'copy', join(dir, 'long.mp4')]);
+    await b.setFiles('#video-input', [join(dir, 'long.mp4')]);
+    await b.waitFor('document.querySelector("#video").duration > 30 && document.querySelector("#flow-range").value === "gaze"', 20000, 'defaults');
+    assert.deepEqual(await b.eval('[document.querySelector("#ex-start").value, document.querySelector("#ex-end").value]'), ['2.00', '5.50']);
+    assert.match(await b.eval('document.querySelector("#notice").textContent'), /set to the gaze range/);
+    assert.deepEqual(b.logs, []);
+  } finally { b.close(); server.close(); }
+});

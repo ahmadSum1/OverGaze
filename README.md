@@ -204,7 +204,7 @@ With 100+ observers the current-frame dots stay on top, nearer moments over fart
 
 - *play (fast)* plays the video at normal speed in the background and takes frames as they appear (about as long as the video); *seek (exact)* seeks to each sample time, slower for large videos but independent of decoding speed. Both collapse the sample's smeared map; play mode on a busy machine can lose a flow field, which the store bridges.
 - Flow is reliable for camera motion and for large, contrasted objects. Small, fast objects can be missed at low resolution and low sample rates; raise both. Flow is measured in the ERP image, so it is distorted near the poles, like the image itself.
-- *Range* can limit the analysis to the export range, useful for a 30 s clip inside a long download.
+- *Range*: the whole video, the export range, or the **gaze range** (from the first to the last gaze time, plus the pooling window on each side). When gaze is loaded on a video much longer than the gaze (a full YouTube download with 30 s of gaze), the export range and the motion range start out as the gaze range, unless you changed them; a note says so.
 
 **Load motion file (.npz)** uses motion computed outside the browser instead, for example OpenCV's dense optical flow (DIS, dense inverse search), which is more accurate on real video:
 
