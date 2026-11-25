@@ -494,3 +494,32 @@ test('both-eye sample: each person\'s left and right eye are paired, the count i
     assert.deepEqual(b.logs, []);
   } finally { b.close(); server.close(); }
 });
+
+test('observer list grouped by person: the person\'s checkbox and × act on both eyes, each eye can be switched off alone, sorting uses the person\'s score', opts, async () => {
+  const { server, url } = await serve(), b = await launch();
+  try {
+    await b.goto(url + '?sample=eyes');
+    await b.waitFor('!!overgaze.state.people && overgaze.state.agreement?.done', 60000, 'pairs and agreement');
+    assert.equal(await b.eval('document.querySelectorAll("#observer-list details.person").length'), 10);
+    assert.match(await b.eval('document.querySelector("#observer-count").textContent'), /^10 people \(8 with both eyes\)/);
+    // person L#01 + R#09: switch the person off, then one eye back on
+    const sel = 'details.person:has([title*="L/sample_fixations#01 "]) ';
+    await b.eval(`(c => { c.checked = false; c.dispatchEvent(new Event('change', { bubbles: true })); return 1; })(document.querySelector('${sel}[data-person-check]'))`);
+    const idx = n => `overgaze.state.gaze.observers.indexOf("${n}")`;
+    assert.deepEqual(await b.eval(`[overgaze.state.observerEnabled[${idx('L/sample_fixations#01')}], overgaze.state.observerEnabled[${idx('R/sample_fixations#09')}]]`), [0, 0]);
+    await b.eval(`(c => { c.checked = true; c.dispatchEvent(new Event('change', { bubbles: true })); return 1; })(document.querySelector('[data-obs="' + ${idx('R/sample_fixations#09')} + '"]'))`);
+    assert.equal(await b.eval(`document.querySelector('${sel}[data-person-check]').indeterminate`), true, 'one eye on: the person\'s box is half checked');
+    assert.deepEqual(await b.eval('overgaze.settingsJson().gaze_processing.observers_switched_off'), ['L/sample_fixations#01']);
+    // sort by agreement: people in order of their mean score
+    await b.click('#obs-sort');
+    const shown = await b.eval('JSON.stringify([...document.querySelectorAll("#observer-list details.person > summary .agree")].map(e => parseFloat(e.textContent.replace("⚠", "")) || 0))');
+    const v = JSON.parse(shown); assert.deepEqual(v, [...v].sort((a, c) => a - c));
+    const ps = await b.eval('overgaze.settingsJson().gaze_processing.observer_agreement.person_scores');
+    assert.equal(Object.keys(ps).length, 10);
+    // × on the person removes both eyes
+    await b.eval(`document.querySelector('${sel}[data-remove]').click(); 1`);
+    await b.waitFor('document.querySelectorAll("#observer-list details.person").length === 9', 5000, 'both eyes removed');
+    assert.deepEqual((await b.eval('overgaze.settingsJson().gaze_processing.removed_observers')).sort(), ['L/sample_fixations#01', 'R/sample_fixations#09']);
+    assert.deepEqual(b.logs, []);
+  } finally { b.close(); server.close(); }
+});
