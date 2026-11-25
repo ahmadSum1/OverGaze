@@ -98,10 +98,11 @@
       <section id="groups-section" class="side-section" hidden>
         <div class="section-title"><span class="section-icon">☷</span> Observers &amp; conditions <span class="section-number">D</span></div>
         <div id="condition-list" class="chip-list"></div>
-        <div class="list-head"><span id="observer-count">0 observers</span><span><button id="obs-sort" class="link-button" type="button" hidden title="Order the observers by their agreement score, lowest first">sort by agreement</button><span id="obs-sort-sep" hidden> · </span><button id="obs-all" class="link-button" type="button">all</button> · <button id="obs-none" class="link-button" type="button">none</button></span></div>
+        <div class="list-head"><span id="observer-count">0 observers</span><span><button id="obs-sort" class="link-button" type="button" hidden title="Order the observers by their agreement score, lowest first">sort by agreement</button></span></div>
         <div class="setting-row"><label for="eye-pairing">Left and right eyes</label><div class="select-wrap"><select id="eye-pairing"><option value="auto">pair them</option><option value="off">keep them apart</option></select></div></div>
         <p id="pair-status" class="hint"></p>
         <p id="agreement-status" class="hint"></p>
+        <label class="observer-row select-all"><input id="obs-all-check" type="checkbox" checked><span>select all</span><small id="obs-all-count"></small></label>
         <div id="observer-list" class="observer-list"></div>
       </section>
       <section id="reference-section" class="side-section">

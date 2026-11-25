@@ -1186,6 +1186,7 @@ function renderGroups() {
   if (state.people) { renderPeople(g, obsCounts, A, removed); return; }
   $('observer-list').innerHTML = order.map(i => { const o = g.observers[i]; return `<div class="observer-row${A?.low.set.has(i) ? ' flagged' : ''}"><label><input type="checkbox" data-obs="${i}" ${state.observerEnabled[i] ? 'checked' : ''}><i style="background:${obsColor(i)}"></i><span title="${escapeHtml(o)}">${escapeHtml(o)}</span><small>${obsCounts[i]}</small>${scoreCell(i)}</label><button class="row-remove" type="button" data-remove="${i}" title="Remove ${escapeHtml(o)}" aria-label="Remove ${escapeHtml(o)}">×</button></div>`; }).join('')
     + (removed.size ? `<button id="restore-observers" class="link-button" type="button">bring back the ${removed.size} removed</button>` : '');
+  syncSelectAll();
 }
 /** The people of the current gaze set: observer indexes of state.gaze (the pairs are made on state.gazeAll). */
 function peopleNow() {
@@ -1229,6 +1230,7 @@ function renderPeople(g, counts, A, removed) {
       + (p.left >= 0 ? eyeRow(p.left, 'L') : '') + (p.right >= 0 ? eyeRow(p.right, 'R') : '') + '</details>';
   }).join('') + (removed.size ? `<button id="restore-observers" class="link-button" type="button">bring back the ${removed.size} removed</button>` : '');
   for (const c of $('observer-list').querySelectorAll('[data-partial]')) c.indeterminate = true;
+  syncSelectAll();
 }
 $('observer-list').addEventListener('toggle', e => { const d = e.target.closest?.('details[data-person]'); if (!d) return; (state.openPeople ||= new Set())[d.open ? 'add' : 'delete'](Number(d.dataset.person)); }, true);
 $('observer-list').addEventListener('click', e => {
@@ -1250,7 +1252,7 @@ $('observer-list').addEventListener('change', e => {
   const both = e.target.dataset.personCheck;
   if (both != null) { for (const i of both.split(',')) state.observerEnabled[Number(i)] = e.target.checked ? 1 : 0; renderGroups(); drawDensity(); requestRender(); return; }
   const i = e.target.dataset.obs; if (i == null) return; state.observerEnabled[i] = e.target.checked ? 1 : 0;
-  if (state.people) renderGroups();
+  if (state.people) renderGroups(); else syncSelectAll();
   drawDensity(); requestRender();
 });
 $('condition-list').addEventListener('change', e => { const i = e.target.dataset.cond; if (i == null) return; state.conditionEnabled[i] = e.target.checked ? 1 : 0; drawDensity(); requestRender(); });
@@ -1295,7 +1297,7 @@ async function runAgreement() {
 function updateAgreementStatus() {
   const A = state.agreement, el = $('agreement-status');
   if (!el) return;
-  $('obs-sort').hidden = $('obs-sort-sep').hidden = !(A && A.done);
+  $('obs-sort').hidden = !(A && A.done);
   if (!A) { el.textContent = ''; return; }
   if (!A.done) { el.textContent = `Scoring agreement between observers… ${Math.round(100 * (A.progress || 0))} %`; return; }
   const n = A.low.set.size;
@@ -1304,8 +1306,21 @@ function updateAgreementStatus() {
 }
 $('obs-sort').addEventListener('click', () => { state.observerSort = state.observerSort === 'agreement' ? 'name' : 'agreement'; $('obs-sort').textContent = state.observerSort === 'agreement' ? 'sort by name' : 'sort by agreement'; renderGroups(); });
 
-$('obs-all').addEventListener('click', () => { if (!state.gaze) return; state.observerEnabled.fill(1); renderGroups(); drawDensity(); requestRender(); });
-$('obs-none').addEventListener('click', () => { if (!state.gaze) return; state.observerEnabled.fill(0); renderGroups(); drawDensity(); requestRender(); });
+// "select all": ticks or unticks every observer still in the list (removed ones stay out); half ticked when some are off
+$('obs-all-check').addEventListener('change', e => {
+  if (!state.gaze) return;
+  const removed = state.removedObservers || new Set();
+  state.gaze.observers.forEach((o, i) => { if (!removed.has(o)) state.observerEnabled[i] = e.target.checked ? 1 : 0; });
+  renderGroups(); drawDensity(); requestRender();
+});
+function syncSelectAll() {
+  const g = state.gaze, box = $('obs-all-check');
+  if (!g || !state.observerEnabled) return;
+  const removed = state.removedObservers || new Set(), idx = g.observers.map((o, i) => (removed.has(o) ? -1 : i)).filter(i => i >= 0);
+  const on = idx.filter(i => state.observerEnabled[i]).length;
+  box.checked = on === idx.length; box.indeterminate = on > 0 && on < idx.length;
+  $('obs-all-count').textContent = `${on} of ${idx.length} on`;
+}
 
 // ---------- motion analysis ----------
 function updateFlowUi() {
