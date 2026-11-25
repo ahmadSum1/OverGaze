@@ -158,7 +158,8 @@
           <button id="play" class="nav-button play-button" type="button" aria-label="Play" disabled>▶</button>
           <button id="prev-frame" class="nav-button" type="button" aria-label="Previous frame" title="Previous frame (←)" disabled>‹</button>
           <button id="next-frame" class="nav-button" type="button" aria-label="Next frame" title="Next frame (→)" disabled>›</button>
-          <button id="loop" class="nav-button" type="button" aria-label="Repeat" aria-pressed="false" title="Repeat: start again at the end (L)">⟳</button>
+          <button id="loop" class="nav-button" type="button" aria-label="Repeat" aria-pressed="false" title="Repeat: start again at the end of the range chosen next to it (L)">⟳</button>
+          <select id="loop-range" aria-label="Range to repeat" title="What ⟳ repeats"><option value="all">whole video</option><option value="export">export range</option><option value="gaze">gaze range</option></select>
           <div class="scrub">
             <canvas id="density-canvas" class="density" title="Gaze points over time (click to seek)"></canvas>
             <input id="scrubber" type="range" min="0" max="1" step="0.001" value="0" aria-label="Video position" disabled>
