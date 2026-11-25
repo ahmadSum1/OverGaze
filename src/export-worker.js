@@ -11,7 +11,7 @@ self.onmessage = async event => {
     if (m.cmd === 'init') {
       job = {
         gaze: m.gaze, settings: m.settings, W: m.W, H: m.H, format: m.format, work: {},
-        ctx: { fps: m.fps, observerEnabled: m.observerEnabled, conditionEnabled: m.conditionEnabled, flow: m.flow ? FlowStore.from(m.flow) : null }
+        ctx: (f => ({ fps: m.fps, observerEnabled: m.observerEnabled, conditionEnabled: m.conditionEnabled, flow: m.settings.motionComp ? f : null, memoryFlow: f }))(m.flow ? FlowStore.from(m.flow) : null)
       };
       self.postMessage({ cmd: 'ready' });
       return;

@@ -605,3 +605,28 @@ test('with pooling on, points of the current frame, earlier and later moments ar
     assert.deepEqual(b.logs, []);
   } finally { b.close(); server.close(); }
 });
+
+test('scene memory: weight w adds the places looked at since the clip started; the area it adds can be outlined on its own; saved in settings.json', opts, async () => {
+  const { server, url } = await serve(), b = await launch();
+  try {
+    await b.goto(url + '?sample=eyes');
+    await b.waitFor('!!overgaze.state.gaze && document.querySelector("#video").readyState >= 2', 20000, 'sample');
+    await b.eval(`overgaze.applySettings({ windowSec: 1, kernel: 'gaussian' }); document.querySelector('#video').currentTime = 6; 1`); await new Promise(r => setTimeout(r, 1000));
+    // pixels salient with memory that are not salient in the pooled map alone
+    const added = () => b.eval(`(() => { const r = overgaze.mapAt(180, 256, 'max'); if (!r.plain) return 0; let n = 0; for (let i = 0; i < r.map.length; i++) if (r.map[i] >= 0.1 && r.plain[i] < 0.1) n++; return n; })()`);
+    assert.equal(await added(), 0, 'no memory: nothing added');
+    await b.eval(`(e => { e.value = '0.3'; e.dispatchEvent(new Event('change')); return 1; })(document.querySelector('#memory-weight'))`);
+    const n = await added();
+    assert.ok(n > 50, `memory adds salient area where the pooled map has none (${n} pixels)`);
+    assert.match(await b.eval('document.querySelector("#memory-hint").textContent'), /No motion analysed or loaded/);
+    await b.eval(`(e => { e.checked = true; e.dispatchEvent(new Event('change')); return 1; })(document.querySelector('#show-memory-outline'))`);
+    await new Promise(r => setTimeout(r, 600));
+    const lines = await b.eval('overgaze.state.outlines.lines.map(l => [l.color, l.segs.length])');
+    assert.ok(lines.some(([c, n]) => c === '#ff4fd8' && n > 0), `the added area is outlined in its own colour (${JSON.stringify(lines)})`);
+    const js = await b.eval('overgaze.settingsJson()');
+    assert.equal(js.saliency.scene_memory_weight, 0.3); assert.match(js.saliency.scene_memory, /not moved/);
+    assert.equal(js.display.memory_outline.show, true);
+    assert.match(await b.eval('document.querySelector("#readout-badge").textContent'), /memory 0\.3/);
+    assert.deepEqual(b.logs, []);
+  } finally { b.close(); server.close(); }
+});
