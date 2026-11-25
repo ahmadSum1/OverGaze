@@ -541,3 +541,33 @@ test('eyes with a shared ID are paired from the names; data without eye names is
   const g2 = buildGaze([{ table: t2, name: 'y.csv' }], { ...detectMapping(t2, { duration: 30 }), observerFrom: 'column', observer: 'user' }, { fps: 30 });
   assert.equal(pairEyes(g2, { observerFrom: 'column', fileCount: 1 }), null);
 });
+
+// ---------- gaze points to draw ----------
+import { collectMarks, dwellStarts } from '../src/marks.js';
+
+test('marks: one per fixation in the window, current or earlier / later, time into the fixation as its dwell', () => {
+  // fixations [0.0, 0.5), [0.6, 1.4), [1.5, 1.8) of one observer
+  const g = packRecords([[0, 0.5, 0, 0, 0, 0, 1], [0.6, 1.4, 0.1, 0, 0, 0, 1], [1.5, 1.8, 0.2, 0, 0, 0, 1]], ['o'], ['c']);
+  const s = { ...DEFAULTS, windowSec: 1 };
+  const m = collectMarks(g, 1.0, s, { fps: 10 });
+  assert.equal(m.length, 3, 'each fixation once, not once per frame');
+  const [a, b, c] = m;
+  assert.equal(b.current, true); close(b.dwell, 0.4, 1e-9, '0.4 s into the fixation'); assert.equal(b.dt, 0);
+  assert.equal(a.current, false); close(a.dt, -0.5, 1e-9, 'ended 0.5 s before'); close(a.dwell, 0.5, 1e-9);
+  close(c.dt, 0.5, 1e-9, 'starts 0.5 s later'); close(c.dwell, 0, 1e-9);
+  assert.equal(collectMarks(g, 1.0, { ...s, causal: true }, { fps: 10 }).length, 2, 'past only');
+  assert.equal(collectMarks(g, 1.0, { ...s, windowSec: 0 }, { fps: 10 }).length, 1, 'this frame only');
+});
+
+test('marks: raw gaze samples dwell while the eye stays within 1.5° of where it arrived; motion moves earlier points', () => {
+  const rec = [];
+  for (let k = 0; k < 10; k++) rec.push([k * 0.1, k * 0.1, (k < 6 ? 0.2 : 20) * DEG * (k < 6 ? k / 6 : 1), 0, 0, 0, 1]);
+  const g = packRecords(rec, ['o'], ['c']);
+  const st = dwellStarts(g);
+  close(g.t0[5] - st[5], 0.5, 1e-9, 'stayed within 1.5° for 0.5 s'); close(g.t0[7] - st[7], 0.1, 1e-9, 'moved at 0.6 s');
+  const flow = new FlowStore(64, 32); const u = new Float32Array(64 * 32).fill(1), v = new Float32Array(64 * 32);
+  for (let k = 0; k < 20; k++) flow.add(k * 0.1, (k + 1) * 0.1, u, v);   // 10 px/s
+  const marks = collectMarks(g, 0.95, { ...DEFAULTS, windowSec: 1, motionComp: true }, { fps: 10, flow });
+  const first = marks.find(m => m.dt < -0.9);
+  assert.ok(first.lon > first.lon0, 'an earlier point is moved along the motion'); close(first.lat, first.lat0, 1e-9);
+});

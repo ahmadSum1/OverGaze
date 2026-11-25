@@ -523,3 +523,36 @@ test('observer list grouped by person: the person\'s checkbox and × act on both
     assert.deepEqual(b.logs, []);
   } finally { b.close(); server.close(); }
 });
+
+test('gaze points "more": dot size, growth while the eye stays in place, dashed line between a person\'s eyes; saved in settings.json and read back', opts, async () => {
+  const { server, url } = await serve(), b = await launch();
+  try {
+    await b.goto(url + '?sample=eyes');
+    await b.waitFor('!!overgaze.state.people && document.querySelector("#video").readyState >= 2', 20000, 'sample');
+    await b.eval(`document.querySelector('#video').currentTime = 4; 1`); await new Promise(r => setTimeout(r, 1200));
+    const ink = () => b.eval(`(() => { const c = document.querySelector('#marks-canvas'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++; return n; })()`);
+    const set = (id, v) => b.eval(`(e => { if (e.type === 'checkbox') e.checked = ${JSON.stringify(v)}; else e.value = ${JSON.stringify(v)}; e.dispatchEvent(new Event('change')); return 1; })(document.querySelector('#${id}'))`);
+    const tick = () => new Promise(r => setTimeout(r, 400));
+    const small = await ink();
+    await set('point-size', '14'); await tick();
+    const big = await ink();
+    assert.ok(big > small * 2, `bigger dots cover more (${small} → ${big} pixels)`);
+    await set('point-size', '6'); await set('point-dwell', true); await tick();
+    const grown = await ink();
+    assert.ok(grown > small * 1.3, `dots grow with the time in place (${small} → ${grown})`);
+    // the two eyes of a person are under 1° apart in the sample, so the lines hide under the dots: count the dashed strokes
+    await b.eval(`(() => { window.__dashed = 0; const st = CanvasRenderingContext2D.prototype.stroke; CanvasRenderingContext2D.prototype.stroke = function (...a) { if (this.getLineDash().length) window.__dashed++; return st.apply(this, a); }; return 1; })()`);
+    await set('point-dwell', false); await set('point-eye-lines', true); await tick();
+    const lines = await b.eval('window.__dashed');
+    assert.ok(lines >= 7, `dashed lines join the eyes of the people with both eyes in this frame (${lines})`);
+    const gp = await b.eval('overgaze.settingsJson().display.gaze_points');
+    assert.equal(gp.dot_size_px, 6); assert.equal(gp.join_eyes, true); assert.equal(gp.grow_while_in_place, false); assert.equal(gp.grow_cap_times_size, 3);
+    // read back: a settings file with other values
+    const dir = mkdtempSync(join(tmpdir(), 'overgaze-points-'));
+    writeFileSync(join(dir, 's.overgaze.json'), JSON.stringify({ ...(await b.eval('overgaze.settingsJson()')), display: { gaze_points: { ...gp, dot_size_px: 11, grow_while_in_place: true, grow_cap_times_size: 4, join_eyes: false } } }));
+    await b.setFiles('#template-input', [join(dir, 's.overgaze.json')]);
+    await b.waitFor('overgaze.state.points.size === 11', 5000, 'settings read back');
+    assert.deepEqual(await b.eval('[overgaze.state.points.dwell, overgaze.state.points.dwellCap, overgaze.state.points.eyeLines, document.querySelector("#point-size").value]'), [true, 4, false, '11']);
+    assert.deepEqual(b.logs.filter(l => !l.includes('willReadFrequently')), [], 'no errors (the read-back warning comes from this test)');
+  } finally { b.close(); server.close(); }
+});

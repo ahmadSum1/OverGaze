@@ -39,7 +39,7 @@ export const DEFAULTS = Object.freeze({
 export const frameCentre = (k, fps) => (k + 0.5) / fps;
 export const frameOf = (t, fps) => Math.max(0, Math.floor(t * fps + 1e-6));
 
-function temporalWeight(d, reach, s) {
+export function temporalWeight(d, reach, s) {
   if (s.kernel === 'triangle') return Math.max(0, 1 - d / reach);
   if (s.kernel === 'peaked') return Math.exp(-d / Math.max(1e-3, s.peakTauSec ?? 0.25));
   if (s.kernel === 'gaussian') {

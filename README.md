@@ -173,6 +173,16 @@ The readout under the video shows the points in the window, the observers that c
 
 ![Coverage readout](docs/screenshots/10-coverage-readout.png)
 
+### Gaze points
+
+**Show gaze points** draws one dot per fixation (or raw gaze sample) in the pooling window, in the observer's colour. Under it, **more**:
+
+- **Dot size** in screen pixels (the same in the 360° view at any zoom).
+- **Grow while the eye stays in place**: a dot gains its own size every 0.5 s its eye stays put, up to the cap (× the dot size). Fixation files: by the time into the fixation. Raw gaze samples: while they stay within 1.5° of where the eye arrived.
+- **Join each person's two eyes**: a thin dashed line between a person's left- and right-eye dot in the current frame (needs paired eyes).
+
+These are saved in settings.json under `display.gaze_points` and read back from a settings file.
+
 ### Motion compensation
 
 **Analyse motion** decodes the video at low resolution (128 × 64 to 512 × 256), computes dense optical flow between frames about 1/10 s apart (pyramidal Lucas–Kanade on grey frames, with wrap-around at the left/right edge for 360° video, smoothed with each pixel weighted by how well its motion is determined; then each pixel keeps whichever movement matches the next frame best: its own, a neighbour's, or none, with a small charge for moving so that still parts of the picture stay still) and keeps the velocity fields in memory. With **Use motion compensation** on, every pooled gaze point is moved along the flow from its own time to the frame time, so a panning camera or a moving object keeps its saliency on the object instead of smearing along the path. **Show flow vectors** draws the field (arrow = motion over 0.5 s).
