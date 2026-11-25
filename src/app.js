@@ -1354,7 +1354,7 @@ async function analyseMotion() {
   const started = performance.now();
   try {
     if (estimate === 'farneback') {
-      // OpenCV.js (about 10 MB, from this site's vendor folder) is loaded only now, the first time it is needed
+      // OpenCV.js (about 10 MB, from this site's lib folder) is loaded only now, the first time it is needed
       setStatus('Loading OpenCV.js for the Farnebäck estimate…');
       const t0 = performance.now();
       const ok = await new Promise(resolve => { const id = ++seq; pending.set(id, msg => resolve(!msg.error && msg.loaded)); worker.postMessage({ id, load: true }); });

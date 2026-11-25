@@ -647,10 +647,10 @@ test('motion checks: textured patches that did not change get no motion, flat on
   assert.equal(pu[0], 1, 'top row takes row 1'); assert.equal(pv[0], 0); assert.equal(pu[(H - 1) * W], H - 2); assert.equal(pu[5 * W], 5, 'middle rows untouched');
 });
 
-test('Farnebäck (OpenCV.js from vendor/) finds a known shift across the left/right edge and no motion on a still background', async () => {
-  const code = (await import('node:fs')).readFileSync(new URL('../vendor/opencv/opencv.js', import.meta.url), 'utf8');
+test('Farnebäck (OpenCV.js from lib/) finds a known shift across the left/right edge and no motion on a still background', async () => {
+  const code = (await import('node:fs')).readFileSync(new URL('../lib/opencv/opencv.js', import.meta.url), 'utf8');
   const mod = { exports: {} };
-  const { createRequire } = await import('node:module'), path = new URL('../vendor/opencv/opencv.js', import.meta.url).pathname;
+  const { createRequire } = await import('node:module'), path = new URL('../lib/opencv/opencv.js', import.meta.url).pathname;
   new Function('module', 'exports', 'define', 'require', '__dirname', '__filename', code)(mod, mod.exports, undefined, createRequire(path), path.replace(/\/[^/]*$/, ''), path);
   const cv = await new Promise(r => mod.exports.then(c => { delete c.then; r(c); }));
   const W = 128, H = 64, a = new Float32Array(W * H), b = new Float32Array(W * H);
