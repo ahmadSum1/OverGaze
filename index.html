@@ -148,6 +148,7 @@
               <canvas id="outline-canvas"></canvas>
               <canvas id="marks-canvas"></canvas>
               <canvas id="view360-canvas" hidden></canvas>
+              <div id="points-legend" class="points-legend" hidden></div>
             </div>
             <div id="view360-bar" class="view360-bar" hidden><select id="view360-mode" aria-label="View"></select><span>drag to look around · wheel to zoom · double-click to reset</span><label><input id="view360-follow" type="checkbox"> follow the gaze</label><span id="view360-info"></span></div>
           </div>
@@ -261,6 +262,9 @@
           <div class="setting-row"><label for="point-dwell-cap">Grow up to (× the dot size)</label><input id="point-dwell-cap" class="num" type="number" min="1" max="10" step="0.5" value="3"></div>
           <p class="hint">A dot gains its own size every 0.5 s its eye stays put, up to the cap: fixations by the time into the fixation, raw gaze samples while they stay within 1.5° of where the eye arrived.</p>
           <label class="view-switch"><span>Join each person's two eyes (dashed line)</span><input id="point-eye-lines" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
+          <p class="hint">With pooling on: dots of the current frame are solid with a white edge; earlier ones are rings, later ones solid but faint, both fading with the time away from the current frame.</p>
+          <label class="view-switch"><span>Line from where a point was recorded to where motion moved it</span><input id="point-motion-lines" type="checkbox" role="switch" checked><span class="switch-track" aria-hidden="true"></span></label>
+          <label class="view-switch"><span>Legend on the video</span><input id="point-legend" type="checkbox" role="switch" checked><span class="switch-track" aria-hidden="true"></span></label>
         </details>
       </div>
 

@@ -27,7 +27,7 @@ const state = {
   settings: { ...DEFAULTS, velocity: 0, minDurationMs: 0, eyePairing: 'auto' }, people: null,
   rowRules: [], agreement: null, observerSort: 'name',
   display: { outline: false, outlineColor: '#c8f56a', outlineTouched: false, outlineWidth: 2, mode: 'heat', colormap: 'jet', opacity: 0.65, gamma: 1, mapWidth: 512, showPoints: true, showFlow: false },
-  points: { size: 6, dwell: false, dwellCap: 3, eyeLines: false },
+  points: { size: 6, dwell: false, dwellCap: 3, eyeLines: false, motionLines: true, legend: true },
   flow: null, flowInfo: null, analysing: null, exporting: null, recording: null,
   work: {}, last: null, renderQueued: false, projectionTouched: false, density: null,
   library: { videos: [], gaze: [], refs: [] }, tiedTo: null,
@@ -703,6 +703,7 @@ function drawMarks(t, result) {
     }
   }
   state.marksT = t; state.marksResult = !!result;
+  updatePointsLegend();
   // in the 360° view the points are drawn into the view's source at the view's zoom (draw360), so their size stays
   // in screen pixels
   if (state.display.showPoints && state.showGaze && result && !state.view) drawGazePoints(g, t, cw, ch, dpr);
@@ -726,16 +727,58 @@ function drawGazePoints(g, t, cw, ch, dpr) {
     }
     g.restore();
   }
-  // largest first, so small dots stay visible on top
-  marks.sort((a, b) => radius(b) - radius(a));
-  const styles = obsStyles();
-  for (const m of marks) {
-    dotPath(g, X(m), Y(m), radius(m), styles[m.obs]?.eye);
-    g.fillStyle = styles[m.obs]?.color || '#fff'; g.globalAlpha = 0.35 + 0.65 * m.w; g.fill();
-    g.globalAlpha = 1; g.lineWidth = 1 * dpr; g.strokeStyle = 'rgba(0,0,0,0.7)'; g.stroke();
+  const styles = obsStyles(), S = state.settings, reach = Math.max(1e-6, S.windowSec + 0.5 / state.fps);
+  // fainter with the time away from the current frame: 0.85 next to it, 0.15 at the edge of the window
+  const alpha = m => (m.current ? 1 : 0.15 + 0.7 * Math.max(0, 1 - Math.abs(m.dt) / reach));
+  if (P.motionLines && S.motionComp && state.flow) {
+    g.lineWidth = 1 * dpr;
+    for (const m of marks) {
+      if (m.current || (m.lon === m.lon0 && m.lat === m.lat0)) continue;
+      const x0 = (m.lon0 / TAU + 0.5) * cw, y0 = (0.5 - m.lat0 / Math.PI) * ch;
+      if (Math.abs(x0 - X(m)) > cw / 2) continue;
+      g.globalAlpha = alpha(m) * 0.8; g.strokeStyle = styles[m.obs]?.color || '#fff';
+      g.beginPath(); g.moveTo(x0, y0); g.lineTo(X(m), Y(m)); g.stroke();
+    }
+    g.globalAlpha = 1;
   }
+  // the current frame on top, then nearer moments over farther ones; within those, small dots over big ones
+  marks.sort((a, b) => a.current - b.current || Math.abs(b.dt) - Math.abs(a.dt) || radius(b) - radius(a));
+  for (const m of marks) {
+    const c = styles[m.obs]?.color || '#fff', r = radius(m);
+    dotPath(g, X(m), Y(m), r, styles[m.obs]?.eye);
+    if (m.current) {
+      g.globalAlpha = 1; g.fillStyle = c; g.fill();
+      g.lineWidth = 1.5 * dpr; g.strokeStyle = '#fff'; g.stroke();
+    } else if (m.dt < 0) {
+      // earlier: a ring (dark under the colour, so it shows on bright video)
+      g.globalAlpha = alpha(m); g.lineWidth = 3 * dpr; g.strokeStyle = 'rgba(0,0,0,0.8)'; g.stroke();
+      g.lineWidth = 1.6 * dpr; g.strokeStyle = c; g.stroke();
+    } else {
+      // later: solid, faint
+      g.globalAlpha = alpha(m); g.fillStyle = c; g.fill();
+      g.lineWidth = 1 * dpr; g.strokeStyle = 'rgba(0,0,0,0.7)'; g.stroke();
+    }
+  }
+  g.globalAlpha = 1;
 }
-function pointsJson() { const P = state.points; return { show: state.display.showPoints, dot_size_px: P.size, grow_while_in_place: P.dwell, grow_cap_times_size: P.dwellCap, grow_rule: 'radius × (1 + time in place / 0.5 s), up to the cap; fixations: time into the fixation; raw samples: time within 1.5° of where the eye arrived', join_eyes: P.eyeLines, colours: 'one per person, both eyes share it, from this list in turn (repeating after 12)', colour_list: PERSON_COLORS, shapes: 'circle = left eye or an unpaired recording, square = right eye' }; }
+/** The legend over the video: what the shapes and styles of the gaze points mean, for the current settings. */
+function updatePointsLegend() {
+  const el = $('points-legend'), S = state.settings, P = state.points;
+  const on = P.legend && state.display.showPoints && state.showGaze && !!state.gaze;
+  el.hidden = !on;
+  if (!on) return;
+  const dot = (fill, stroke, sw, square, op = 1) => `<svg width="12" height="12" viewBox="0 0 12 12" style="opacity:${op}">${square ? `<rect x="2" y="2" width="8" height="8" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"/>` : `<circle cx="6" cy="6" r="4.5" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"/>`}</svg>`;
+  const rows = [];
+  rows.push(`<div>${dot('#9aa0a8', '#fff', 1.5)}${state.people ? dot('#9aa0a8', '#fff', 1.5, true) : ''}<span>${S.windowSec > 0 ? 'this frame' : 'gaze'}${state.people ? ': circle left eye, square right eye, colour = person' : ''}</span></div>`);
+  if (S.windowSec > 0) {
+    rows.push(`<div>${dot('none', '#9aa0a8', 2, false, 0.8)}<span>earlier (fainter the further back)</span></div>`);
+    if (!S.causal) rows.push(`<div>${dot('#9aa0a8', '#000', 1, false, 0.45)}<span>later (fainter the further ahead)</span></div>`);
+    if (S.motionComp && state.flow && P.motionLines) rows.push(`<div><svg width="12" height="12"><line x1="1" y1="10" x2="11" y2="2" stroke="#9aa0a8" stroke-width="1.2"/></svg><span>moved by motion from where it was recorded</span></div>`);
+  }
+  if (P.eyeLines && state.people) rows.push(`<div><svg width="12" height="12"><line x1="1" y1="6" x2="11" y2="6" stroke="#fff" stroke-dasharray="3 2"/></svg><span>a person's two eyes</span></div>`);
+  el.innerHTML = rows.join('');
+}
+function pointsJson() { const P = state.points; return { show: state.display.showPoints, dot_size_px: P.size, grow_while_in_place: P.dwell, grow_cap_times_size: P.dwellCap, grow_rule: 'radius × (1 + time in place / 0.5 s), up to the cap; fixations: time into the fixation; raw samples: time within 1.5° of where the eye arrived', join_eyes: P.eyeLines, motion_lines: P.motionLines, legend: P.legend, time_styles: 'with pooling: current frame solid with a white edge; earlier = rings, later = solid; both fading from 0.85 to 0.15 opacity across the window', colours: 'one per person, both eyes share it, from this list in turn (repeating after 12)', colour_list: PERSON_COLORS, shapes: 'circle = left eye or an unpaired recording, square = right eye' }; }
 function applyPoints(o = {}) {
   const P = state.points;
   if ('show' in o) { state.display.showPoints = !!o.show; $('show-points').checked = !!o.show; }
@@ -743,13 +786,17 @@ function applyPoints(o = {}) {
   if ('grow_while_in_place' in o) P.dwell = !!o.grow_while_in_place;
   if (Number(o.grow_cap_times_size) >= 1) P.dwellCap = Math.min(10, Number(o.grow_cap_times_size));
   if ('join_eyes' in o) P.eyeLines = !!o.join_eyes;
-  $('point-size').value = String(P.size); $('point-dwell').checked = P.dwell; $('point-dwell-cap').value = String(P.dwellCap); $('point-eye-lines').checked = P.eyeLines;
+  if ('motion_lines' in o) P.motionLines = !!o.motion_lines;
+  if ('legend' in o) P.legend = !!o.legend;
+  $('point-size').value = String(P.size); $('point-dwell').checked = P.dwell; $('point-dwell-cap').value = String(P.dwellCap); $('point-eye-lines').checked = P.eyeLines; $('point-motion-lines').checked = P.motionLines; $('point-legend').checked = P.legend;
   requestRender();
 }
 $('point-size').addEventListener('change', e => applyPoints({ dot_size_px: e.target.value }));
 $('point-dwell').addEventListener('change', e => applyPoints({ grow_while_in_place: e.target.checked }));
 $('point-dwell-cap').addEventListener('change', e => applyPoints({ grow_cap_times_size: e.target.value }));
 $('point-eye-lines').addEventListener('change', e => applyPoints({ join_eyes: e.target.checked }));
+$('point-motion-lines').addEventListener('change', e => applyPoints({ motion_lines: e.target.checked }));
+$('point-legend').addEventListener('change', e => applyPoints({ legend: e.target.checked }));
 
 // ---------- density strip ----------
 function computeDensity() {
