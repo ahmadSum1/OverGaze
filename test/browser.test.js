@@ -685,3 +685,22 @@ test('repeat a range: the export range or the gaze range plays over and over; th
     assert.deepEqual(b.logs, []);
   } finally { b.close(); server.close(); }
 });
+
+test('a video named after its YouTube original gets a link to it, at the moment shown', opts, async () => {
+  const { server, url } = await serve(), b = await launch();
+  const dir = mkdtempSync(join(tmpdir(), 'overgaze-origin-'));
+  try {
+    copyFileSync(join(ROOT, 'sample', 'sample_erp.mp4'), join(dir, 'dQw4w9WgXcQ-10.mp4'));
+    await b.goto(url + '?sample');
+    await b.waitFor('document.querySelector("#video").readyState >= 2', 20000);
+    assert.equal(await b.eval('document.querySelector("#video-original-row").hidden'), true, 'no link for the sample');
+    await b.setFiles('#video-input', [join(dir, 'dQw4w9WgXcQ-10.mp4')]);
+    await b.waitFor('document.querySelector("#video").readyState >= 2 && !document.querySelector("#video-original-row").hidden', 20000, 'link');
+    await b.eval(`document.querySelector('#video').currentTime = 3.6; 1`); await new Promise(r => setTimeout(r, 500));
+    await b.eval(`document.querySelector('#video-original').dispatchEvent(new Event('focus')); 1`);
+    // the file (8 s) is shorter than the clip start (10 s): a cut clip, so the original is at 10 + 3.6 s
+    assert.equal(await b.eval('document.querySelector("#video-original").href'), 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=13');
+    assert.equal(await b.eval('document.querySelector("#video-original").target'), '_blank');
+    assert.equal((await b.eval('overgaze.settingsJson().video.original')).id, 'dQw4w9WgXcQ');
+  } finally { b.close(); server.close(); }
+});
