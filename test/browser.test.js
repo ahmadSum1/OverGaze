@@ -478,3 +478,19 @@ test('a motion file made outside the browser (.npz) replaces the estimate: statu
     assert.equal(await b.eval('overgaze.state.flowInfo.file'), 'tiny.motion.npz', 'the loaded motion stays');
   } finally { b.close(); server.close(); }
 });
+
+test('both-eye sample: each person\'s left and right eye are paired, the count is shown and saved in settings.json', opts, async () => {
+  const { server, url } = await serve(), b = await launch();
+  try {
+    await b.goto(url + '?sample=eyes');
+    await b.waitFor('!!overgaze.state.gaze && !!overgaze.state.people', 20000, 'pairs');
+    assert.match(await b.eval('document.querySelector("#pair-status").textContent'), /^8 people with both eyes, 2 recordings with no partner \(1 left, 1 right\)\. Partners found by matching/);
+    const ep = await b.eval('overgaze.settingsJson().gaze_processing.eye_pairing');
+    assert.equal(ep.setting, 'auto'); assert.equal(ep.pairs, 8); assert.equal(ep.people.length, 10);
+    assert.deepEqual(ep.people[0], { left: 'L/sample_fixations#01', right: 'R/sample_fixations#09', match: 1 });
+    await b.eval(`(e => { e.value = 'off'; e.dispatchEvent(new Event('change')); return 1; })(document.querySelector('#eye-pairing'))`);
+    assert.equal(await b.eval('overgaze.state.people'), null);
+    assert.equal(await b.eval('overgaze.settingsJson().gaze_processing.eye_pairing.setting'), 'off');
+    assert.deepEqual(b.logs, []);
+  } finally { b.close(); server.close(); }
+});

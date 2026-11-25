@@ -25,7 +25,7 @@
         <div class="help-panel">
           <strong>Getting started</strong>
           <p>Load a video and one or more gaze files (CSV, TSV, JSON or ARFF), or try the synthetic 360° sample: a red ball moving across a panning scene, watched by 8 simulated observers.</p>
-          <button id="load-sample" class="button button-outline" type="button">Load 360° sample</button> <button id="load-sample-2d" class="button button-outline" type="button">Load 2D sample</button>
+          <button id="load-sample" class="button button-outline" type="button">Load 360° sample</button> <button id="load-sample-2d" class="button button-outline" type="button">Load 2D sample</button> <button id="load-sample-eyes" class="button button-outline" type="button">Load 360° sample, both eyes</button>
           <strong>Something wrong?</strong>
           <p>Copy what is loaded and every message so far, and paste it into a message.</p>
           <button id="copy-debug-help" class="button button-outline" type="button">Copy debug details</button>
@@ -99,6 +99,8 @@
         <div class="section-title"><span class="section-icon">☷</span> Observers &amp; conditions <span class="section-number">D</span></div>
         <div id="condition-list" class="chip-list"></div>
         <div class="list-head"><span id="observer-count">0 observers</span><span><button id="obs-sort" class="link-button" type="button" hidden title="Order the observers by their agreement score, lowest first">sort by agreement</button><span id="obs-sort-sep" hidden> · </span><button id="obs-all" class="link-button" type="button">all</button> · <button id="obs-none" class="link-button" type="button">none</button></span></div>
+        <div class="setting-row"><label for="eye-pairing">Left and right eyes</label><div class="select-wrap"><select id="eye-pairing"><option value="auto">pair them</option><option value="off">keep them apart</option></select></div></div>
+        <p id="pair-status" class="hint"></p>
         <p id="agreement-status" class="hint"></p>
         <div id="observer-list" class="observer-list"></div>
       </section>

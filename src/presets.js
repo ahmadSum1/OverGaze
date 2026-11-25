@@ -41,7 +41,7 @@ export const PRESETS = [
 
 /** The settings that a preset or template holds (everything that changes the maps or the coverage). */
 export const SETTING_KEYS = ['projection', 'sigmaDeg', 'truncate', 'planarFovDeg', 'windowSec', 'kernel', 'peakTauSec', 'causal', 'durationWeight',
-  'motionComp', 'lonOffsetDeg', 'flipX', 'flipY', 'velocity', 'minDurationMs', 'coverageThreshold'];
+  'motionComp', 'lonOffsetDeg', 'flipX', 'flipY', 'velocity', 'minDurationMs', 'coverageThreshold', 'eyePairing'];
 
 export function pickSettings(s) { return Object.fromEntries(SETTING_KEYS.filter(k => s[k] !== undefined && s[k] !== null).map(k => [k, s[k]])); }
 
@@ -70,7 +70,7 @@ export function settingsFromJson(obj) {
         projection: sal.projection, sigmaDeg: sal.sigma_deg, truncate: sal.kernel_cutoff_sigma, planarFovDeg: sal.planar_fov_deg,
         windowSec: sal.pooling_window_s, kernel: sal.pooling_weight, peakTauSec: sal.peaked_tau_s, causal: sal.causal, durationWeight: sal.weight_by_duration,
         motionComp: sal.motion_compensation, lonOffsetDeg: sal.lon_offset_deg, flipX: sal.flip_left_right, flipY: sal.flip_up_down,
-        velocity: gp.speed_filter_deg_per_s ?? sal.velocity_filter_deg_per_s, minDurationMs: gp.min_fixation_duration_ms,
+        velocity: gp.speed_filter_deg_per_s ?? sal.velocity_filter_deg_per_s, minDurationMs: gp.min_fixation_duration_ms, eyePairing: gp.eye_pairing?.setting,
         coverageThreshold: sal.coverage_threshold
       })
     });

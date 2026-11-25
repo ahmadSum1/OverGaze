@@ -495,3 +495,49 @@ test('peaked pooling weights fall off as exp(−|Δt| / τ) from the current fra
   close(ws[ws.length - 1], Math.exp(-1 / 0.25), 1e-6, '1 s away');
   assert.equal(collectPoints(g, 0.5 / fps, { ...s, causal: true }, { fps }).n, 26, 'past only: this frame and 25 before');
 });
+
+// ---------- left / right eye pairing ----------
+import { pairEyes, eyeOf, withoutEye, hungarianMax } from '../src/pairs.js';
+import { readFileSync as readFile } from 'node:fs';
+
+test('eye words in names: L, R, left, right, at word edges only', () => {
+  assert.equal(eyeOf('L/x_fixations#01'), 'L'); assert.equal(eyeOf('p01_right'), 'R'); assert.equal(eyeOf('p01-left-eye'), 'L');
+  assert.equal(eyeOf('(root)/Lr_fixations#02'), null); assert.equal(eyeOf('videos-audios/0b4b'), null); assert.equal(eyeOf('Laura'), null);
+  assert.equal(withoutEye('p01_L'), 'p01'); assert.equal(withoutEye('R/p01'), 'p01');
+});
+
+test('best one-to-one assignment', () => {
+  assert.deepEqual(hungarianMax([[0.9, 0.8], [0.85, 0.1]]), [1, 0], 'the sum 0.8 + 0.85 beats 0.9 + 0.1');
+  assert.deepEqual(hungarianMax([[0.2, 0.9, 0.1]]), [1]);
+  assert.deepEqual(hungarianMax([[0.5], [0.7]]), [-1, 0]);
+});
+
+test('Salient360-style eye files (runs numbered separately in each file) are paired by matching fixations', () => {
+  const files = ['L', 'R'].map(side => ({ name: 'sample_fixations.csv', folder: side, table: parseTable(readFile(new URL(`../sample/eyes/${side}/sample_fixations.csv`, import.meta.url), 'utf8')) }));
+  const m = detectMapping(files[0].table, {});
+  const g = buildGaze(files, m, { fps: 30 });
+  const P = pairEyes(g, { preset: m.preset, observerFrom: m.observerFrom, fileCount: 2 });
+  assert.equal(P.method, 'matching'); assert.equal(P.sidesFrom, 'names');
+  assert.equal(P.pairs, 8); assert.equal(P.singleLeft, 1); assert.equal(P.singleRight, 1);
+  // the right-eye file lists the people in the order 7, 5, 2, 6, (stranger), 3, 8, 4, 1 (tools/make_sample_eyes.py)
+  const rightOf = new Map(P.people.filter(p => p.left >= 0 && p.right >= 0).map(p => [g.observers[p.left], g.observers[p.right]]));
+  assert.equal(rightOf.get('L/sample_fixations#01'), 'R/sample_fixations#09');
+  assert.equal(rightOf.get('L/sample_fixations#07'), 'R/sample_fixations#01');
+  assert.ok(P.people.some(p => p.left >= 0 && p.right < 0 && g.observers[p.left] === 'L/sample_fixations#09'), 'the stranger in the left file stays single');
+  // the same two files without their folders: the first file is taken as the left eye
+  const bare = files.map((f, i) => ({ ...f, folder: '', label: i ? 'sample_fixations (2)' : undefined }));
+  const g2 = buildGaze(bare, m, { fps: 30 });
+  const P2 = pairEyes(g2, { preset: m.preset, observerFrom: m.observerFrom, fileCount: 2 });
+  assert.equal(P2.sidesFrom, 'file order'); assert.equal(P2.pairs, 8);
+});
+
+test('eyes with a shared ID are paired from the names; data without eye names is not paired', () => {
+  const csv = 'user,start_time,duration,longitude,latitude\n' + ['p01_L', 'p01_R', 'p02_L', 'p02_R', 'p03_L'].map((u, i) => `${u},${i * 0.1},0.2,${10 * i},0`).join('\n');
+  const t = parseTable(csv, 'x.csv'), m = { ...detectMapping(t, { duration: 30 }), observerFrom: 'column', observer: 'user' };
+  const g = buildGaze([{ table: t, name: 'x.csv' }], m, { fps: 30 });
+  const P = pairEyes(g, { observerFrom: 'column', fileCount: 1 });
+  assert.equal(P.method, 'names'); assert.equal(P.pairs, 2); assert.equal(P.singleLeft, 1);
+  const t2 = parseTable('user,start_time,duration,longitude,latitude\n1,0,0.2,0,0\n2,0,0.2,0,0\n', 'y.csv');
+  const g2 = buildGaze([{ table: t2, name: 'y.csv' }], { ...detectMapping(t2, { duration: 30 }), observerFrom: 'column', observer: 'user' }, { fps: 30 });
+  assert.equal(pairEyes(g2, { observerFrom: 'column', fileCount: 1 }), null);
+});
