@@ -556,3 +556,22 @@ test('gaze points "more": dot size, growth while the eye stays in place, dashed 
     assert.deepEqual(b.logs.filter(l => !l.includes('willReadFrequently')), [], 'no errors (the read-back warning comes from this test)');
   } finally { b.close(); server.close(); }
 });
+
+test('one colour per person: both eyes share it, the left eye is a circle and the right eye a square', opts, async () => {
+  const { server, url } = await serve(), b = await launch();
+  try {
+    await b.goto(url + '?sample=eyes');
+    await b.waitFor('!!overgaze.state.people && document.querySelector("#video").readyState >= 2', 20000, 'sample');
+    await b.eval(`(() => { window.__shapes = { arc: 0, rect: 0 }; const P = CanvasRenderingContext2D.prototype, arc = P.arc, rect = P.rect;
+      P.arc = function (...a) { if (this.canvas.id === 'marks-canvas') window.__shapes.arc++; return arc.apply(this, a); };
+      P.rect = function (...a) { if (this.canvas.id === 'marks-canvas') window.__shapes.rect++; return rect.apply(this, a); }; return 1; })()`);
+    await b.eval(`document.querySelector('#video').currentTime = 4; 1`); await new Promise(r => setTimeout(r, 1200));
+    const shapes = await b.eval('window.__shapes');
+    assert.ok(shapes.arc > 0 && shapes.rect > 0, `circles and squares drawn (${JSON.stringify(shapes)})`);
+    const st = await b.eval(`(() => { const g = overgaze.state.gaze, i = n => g.observers.indexOf(n), dot = document.querySelectorAll('#observer-list details.person'); return { l: overgaze.colorOf(i('L/sample_fixations#01')), r: overgaze.colorOf(i('R/sample_fixations#09')), other: overgaze.colorOf(i('L/sample_fixations#02')) }; })()`);
+    assert.equal(st.l, st.r, 'both eyes of a person share a colour'); assert.notEqual(st.l, st.other);
+    const gp = await b.eval('overgaze.settingsJson().display.gaze_points');
+    assert.equal(gp.colour_list.length, 12); assert.match(gp.shapes, /square = right eye/);
+    assert.deepEqual(b.logs, []);
+  } finally { b.close(); server.close(); }
+});

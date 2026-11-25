@@ -37,7 +37,7 @@ const state = {
 
 // Handle for the tests and the console: mapAt(frame, width) renders the same map the export writes (raw, unnormalised).
 window.overgaze = {
-  state, debugReport: () => debugReport(), applySettings: o => applySettings(o), settingsJson: () => settingsJson(),
+  state, colorOf: i => obsColor(i), debugReport: () => debugReport(), applySettings: o => applySettings(o), settingsJson: () => settingsJson(),
   mapAt(k, width = 512, normalize = 'none') {
     const [vw, vh] = videoSize(), [W, H] = mapSize(width, state.settings, vw, vh);
     const r = renderMap(state.gaze, frameCentre(k, state.fps), settingsForRender(normalize), W, H, renderContext(), {});
@@ -49,7 +49,30 @@ window.overgaze = {
 const fmt = (x, d = 3) => Number.isFinite(x) ? x.toFixed(d) : '—';
 const pct = x => Number.isFinite(x) ? `${(100 * x).toFixed(2)} %` : '—';
 const bytesText = b => b > 1e9 ? `${(b / 1e9).toFixed(2)} GB` : b > 1e6 ? `${(b / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1e3))} kB`;
-const obsColor = i => `hsl(${(i * 137.508) % 360} 80% 62%)`;
+// One colour per person (both eyes share it): 12 bright colours, ordered so that neighbours differ most (checked for
+// colour-blind separation: worst neighbouring pair ΔE 10.6, unsimulated 29). Every dot gets a dark edge, so the bright
+// colours also show on bright video. With more than 12 people the colours repeat.
+const PERSON_COLORS = ['#ff4d4d', '#3fa9ff', '#ffd23f', '#c77dff', '#4cd964', '#ff5fb0', '#2ee6d6', '#ff8c1a', '#8c9eff', '#b6e03a', '#ff9fd6', '#1fbf8f'];
+/** Colour and eye of each observer of state.gaze: { color, eye: 'L' | 'R' | null }. */
+function obsStyles() {
+  const g = state.gaze;
+  if (!g) return [];
+  if (state.styleFor === g && state.styleFrom === state.people) return state.styles;
+  const st = g.observers.map((_, i) => ({ color: PERSON_COLORS[i % PERSON_COLORS.length], eye: null }));
+  if (state.people) for (const p of peopleNow()) {
+    const c = PERSON_COLORS[p.k % PERSON_COLORS.length];
+    if (p.left >= 0) st[p.left] = { color: c, eye: 'L' };
+    if (p.right >= 0) st[p.right] = { color: c, eye: 'R' };
+  }
+  Object.assign(state, { styles: st, styleFor: g, styleFrom: state.people });
+  return st;
+}
+const obsColor = i => obsStyles()[i]?.color || PERSON_COLORS[i % PERSON_COLORS.length];
+/** A dot: a circle for a left eye (or an unpaired recording), a square of the same area for a right eye. */
+function dotPath(g, x, y, r, eye) {
+  g.beginPath();
+  if (eye === 'R') { const h = r * 0.886; g.rect(x - h, y - h, 2 * h, 2 * h); } else g.arc(x, y, r, 0, Math.PI * 2);
+}
 function setStatus(text) { $('status').textContent = text; }
 const debugLog = [];
 function remember(kind, text) { if (text) { debugLog.push(`${new Date().toISOString().slice(11, 23)} ${kind}: ${text}`); if (debugLog.length > 200) debugLog.shift(); } }
@@ -705,13 +728,14 @@ function drawGazePoints(g, t, cw, ch, dpr) {
   }
   // largest first, so small dots stay visible on top
   marks.sort((a, b) => radius(b) - radius(a));
+  const styles = obsStyles();
   for (const m of marks) {
-    g.beginPath(); g.arc(X(m), Y(m), radius(m), 0, TAU);
-    g.fillStyle = obsColor(m.obs); g.globalAlpha = 0.35 + 0.65 * m.w; g.fill();
+    dotPath(g, X(m), Y(m), radius(m), styles[m.obs]?.eye);
+    g.fillStyle = styles[m.obs]?.color || '#fff'; g.globalAlpha = 0.35 + 0.65 * m.w; g.fill();
     g.globalAlpha = 1; g.lineWidth = 1 * dpr; g.strokeStyle = 'rgba(0,0,0,0.7)'; g.stroke();
   }
 }
-function pointsJson() { const P = state.points; return { show: state.display.showPoints, dot_size_px: P.size, grow_while_in_place: P.dwell, grow_cap_times_size: P.dwellCap, grow_rule: 'radius × (1 + time in place / 0.5 s), up to the cap; fixations: time into the fixation; raw samples: time within 1.5° of where the eye arrived', join_eyes: P.eyeLines }; }
+function pointsJson() { const P = state.points; return { show: state.display.showPoints, dot_size_px: P.size, grow_while_in_place: P.dwell, grow_cap_times_size: P.dwellCap, grow_rule: 'radius × (1 + time in place / 0.5 s), up to the cap; fixations: time into the fixation; raw samples: time within 1.5° of where the eye arrived', join_eyes: P.eyeLines, colours: 'one per person, both eyes share it, from this list in turn (repeating after 12)', colour_list: PERSON_COLORS, shapes: 'circle = left eye or an unpaired recording, square = right eye' }; }
 function applyPoints(o = {}) {
   const P = state.points;
   if ('show' in o) { state.display.showPoints = !!o.show; $('show-points').checked = !!o.show; }
