@@ -1,5 +1,5 @@
 // Motion between two greyscale frames, off the main thread.
-//   estimate 'farneback': OpenCV's Farnebäck method (OpenCV.js from vendor/opencv, loaded on the first request)
+//   estimate 'farneback': OpenCV's Farnebäck method (OpenCV.js from lib/opencv, loaded on the first request)
 //   estimate 'builtin':   OverGaze's own estimate (flow.js)
 // Then the checks of flowchecks.js: the motion back from B to A must cancel the motion from A to B, textured
 // patches that did not change get no motion, and rows near the top and bottom of a 360° frame take the
@@ -11,7 +11,7 @@ import { forwardBackward, stillAreas, poleBands } from './flowchecks.js';
 let cvReady = null;
 function loadOpenCv() {
   if (!cvReady) cvReady = (async () => {
-    const res = await fetch(new URL('../vendor/opencv/opencv.js', import.meta.url));
+    const res = await fetch(new URL('../lib/opencv/opencv.js', import.meta.url));
     if (!res.ok) throw new Error(`OpenCV.js could not be loaded (${res.status})`);
     (0, eval)(await res.text());   // its loader sets self.cv to a module that finishes starting later
     const m = self.cv;

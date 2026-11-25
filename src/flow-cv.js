@@ -1,4 +1,4 @@
-// Dense optical flow with OpenCV's Farnebäck method (OpenCV.js, vendor/opencv/opencv.js, loaded only when needed).
+// Dense optical flow with OpenCV's Farnebäck method (OpenCV.js, lib/opencv/opencv.js, loaded only when needed).
 // For 360° video the picture is padded with its other side first, so motion across the left/right edge is found.
 
 export const FARNEBACK = { pyrScale: 0.5, levels: 4, winsize: 15, iterations: 3, polyN: 5, polySigma: 1.1 };

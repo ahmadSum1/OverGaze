@@ -707,7 +707,7 @@ test('a video named after its YouTube original gets a link to it, at the moment 
   } finally { b.close(); server.close(); }
 });
 
-test('motion analysis uses OpenCV Farnebäck (loaded from vendor/ when needed) with the checks; flow arrows can be limited to the gaze points', opts, async () => {
+test('motion analysis uses OpenCV Farnebäck (loaded from lib/ when needed) with the checks; flow arrows can be limited to the gaze points', opts, async () => {
   const { server, url } = await serve(), b = await launch();
   try {
     await b.goto(url + '?sample');
