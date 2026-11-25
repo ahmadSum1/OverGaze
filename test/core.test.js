@@ -663,3 +663,21 @@ test('Farnebäck (OpenCV.js from lib/) finds a known shift across the left/right
   const mx = Math.max(...still.u.map(Math.abs), ...still.v.map(Math.abs));
   assert.ok(mx < 0.1, `(almost) no motion between identical frames (largest ${mx})`);
 });
+
+// ---------- live view while playing: the fast path ----------
+test('the fast path (Gaussian from a table, points moved on from the previous frame) gives the exact map within 0.001 of its maximum', () => {
+  const W = 128, H = 64, flow = new FlowStore(W, H);
+  const u = new Float32Array(W * H).fill(1.5), v = new Float32Array(W * H).fill(0.3);
+  for (let k = 0; k < 40; k++) flow.add(k * 0.1, (k + 1) * 0.1, u, v);
+  const rec = []; let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let k = 0; k < 400; k++) { const a = rnd() * 3.5; rec.push([a, a + 0.1 + rnd() * 0.3, (rnd() - 0.5) * 6, (rnd() - 0.5) * 2, k % 9, 0, 1]); }
+  const g = packRecords(rec, Array.from({ length: 9 }, (_, i) => 'o' + i), ['c']);
+  const s = { ...DEFAULTS, windowSec: 1, kernel: 'gaussian', motionComp: true, normalize: 'max' };
+  const fastCtx = { fps: 30, flow, fast: true, moveCache: {} }, work = {};
+  for (const t of [1.5, 1.5 + 1 / 30, 1.5 + 2 / 30, 1.5 + 3 / 30]) {
+    const exact = renderMap(g, t, s, W, H, { fps: 30, flow }).map.slice(), fast = renderMap(g, t, s, W, H, fastCtx, work).map;
+    let d = 0; for (let i = 0; i < exact.length; i++) d = Math.max(d, Math.abs(exact[i] - fast[i]));
+    assert.ok(d < 1e-3, `at ${t.toFixed(3)} s the largest difference is ${d}`);
+  }
+  assert.ok(fastCtx.moveCache.map.size > 100, 'moved points kept for the next frame');
+});

@@ -66,6 +66,14 @@ export function collectPoints(g, t, s, ctx = {}, out = makePointBuffer()) {
   const offset = (s.lonOffsetDeg || 0) * DEG;
   const obsOn = ctx.observerEnabled, condOn = ctx.conditionEnabled;
   const flow = s.motionComp ? ctx.flow : null;
+  // ctx.moveCache (live view only): points moved to an earlier time, usable when t is a little later (up to 0.25 s)
+  let cache = null;
+  if (flow && ctx.moveCache) {
+    const c = ctx.moveCache, key = [s.flipX, s.flipY, s.lonOffsetDeg, fps].join('|');
+    const ok = c.g === g && c.flow === flow && c.key === key && t > c.t && t - c.t <= 0.25;
+    cache = { prev: ok ? c.map : new Map(), t: c.t, next: new Map() };
+    Object.assign(c, { g, flow, key });
+  }
   // A fixation (an interval longer than half a frame) counts once for every frame it covers, like the per-frame
   // fixation sets the dataset maps are built from; a gaze sample counts once at its own time.
   const isFixation = (a, b) => b - a > 0.5 / fps;
@@ -73,7 +81,14 @@ export function collectPoints(g, t, s, ctx = {}, out = makePointBuffer()) {
     lon = s.flipX ? -lon : lon; lat = s.flipY ? -lat : lat;
     lon += offset;
     lon -= TAU * Math.floor((lon + Math.PI) / TAU);
-    if (flow && Math.abs(anchor - t) > 1e-6) { const p = flow.propagate(lon, lat, anchor, t); lon = p[0]; lat = p[1]; }
+    if (flow && Math.abs(anchor - t) > 1e-6) {
+      // live view while playing: a point already moved to the previous frame's time is moved on from there
+      // (one short step) instead of from its own moment
+      const key = i * 8192 + Math.floor(anchor * fps) % 8192, prev = cache && cache.prev.get(key);   // anchor × fps = frame + 0.5
+      const p = prev ? flow.propagate(prev[0], prev[1], cache.t, t) : flow.propagate(lon, lat, anchor, t);
+      lon = p[0]; lat = p[1];
+      if (cache) cache.next.set(key, [lon, lat]);
+    }
     push(out, lon, lat, w, g.obs[i]);
   };
   for (let i = start; i < g.n; i++) {
@@ -105,6 +120,7 @@ export function collectPoints(g, t, s, ctx = {}, out = makePointBuffer()) {
     if (!(w > 0)) continue;
     add(i, g.lon[i], g.lat[i], w, Math.min(b, Math.max(a, t)));
   }
+  if (cache) Object.assign(ctx.moveCache, { map: cache.next, t });
   return out;
 }
 
@@ -123,11 +139,14 @@ function push(out, lon, lat, w, obs) {
 }
 
 /** Accumulate sphere Gaussians (σ in radians, geodesic distance) into `map` (W×H, ERP). */
-export function splatSphere(map, grid, pts, sigma, truncate = 3) {
+export function splatSphere(map, grid, pts, sigma, truncate = 3, lut = null) {
   const { W, H, sinLat, cosLat, sinLon, cosLon } = grid;
   const cut = Math.min(Math.PI, truncate * sigma);
   const cosCut = Math.cos(cut), inv2s2 = 1 / (2 * sigma * sigma);
   const rowScale = H / Math.PI, colScale = W / TAU;
+  // fast path (live view while playing): the Gaussian as a table over the cosine of the angle, read with linear
+  // interpolation, instead of acos and exp for every pixel; exports use the exact formula
+  const table = lut ? gaussTable(lut, cosCut, inv2s2) : null, tScale = table ? (table.length - 2) / (1 - cosCut) : 0;
   for (let p = 0; p < pts.n; p++) {
     const lon = pts.lon[p], lat = pts.lat[p], w = pts.w[p];
     const sp = Math.sin(lat), cp = Math.cos(lat), sl = Math.sin(lon), cl = Math.cos(lon);
@@ -139,18 +158,30 @@ export function splatSphere(map, grid, pts, sigma, truncate = 3) {
     const x0 = full ? 0 : Math.floor(cx - span * colScale) - 1;
     const x1 = full ? W - 1 : Math.ceil(cx + span * colScale) + 1;
     const count = Math.min(W, x1 - x0 + 1);
+    const xs = ((x0 % W) + W) % W;
     for (let y = y0; y <= y1; y++) {
       const a = sp * sinLat[y], b = cp * cosLat[y], row = y * W;
-      for (let k = 0; k < count; k++) {
-        let x = x0 + k;
-        x = ((x % W) + W) % W;
+      for (let k = 0, x = xs; k < count; k++, x = x + 1 === W ? 0 : x + 1) {
         const dot = a + b * (cosLon[x] * cl + sinLon[x] * sl);
         if (dot <= cosCut) continue;
-        const th = Math.acos(dot > 1 ? 1 : dot);
-        map[row + x] += w * Math.exp(-th * th * inv2s2);
+        if (table) {
+          const f = (dot - cosCut) * tScale, i = f | 0, r = f - i;
+          map[row + x] += w * (table[i] + (table[i + 1] - table[i]) * r);
+        } else {
+          const th = Math.acos(dot > 1 ? 1 : dot);
+          map[row + x] += w * Math.exp(-th * th * inv2s2);
+        }
       }
     }
   }
+}
+/** exp(−acos(c)² / 2σ²) at evenly spaced c from cos(cut) to 1 (4096 steps), kept in `lut` for the current σ. */
+function gaussTable(lut, cosCut, inv2s2) {
+  if (lut.table && lut.cosCut === cosCut && lut.inv2s2 === inv2s2) return lut.table;
+  const n = 4096, t = new Float32Array(n + 2);
+  for (let i = 0; i <= n + 1; i++) { const c = Math.min(1, cosCut + (1 - cosCut) * i / n), th = Math.acos(c); t[i] = Math.exp(-th * th * inv2s2); }
+  Object.assign(lut, { table: t, cosCut, inv2s2 });
+  return t;
 }
 
 /** Accumulate 2D Gaussians (σ in map pixels) into `map` (W×H, planar). Points use the lon/lat → u/v mapping. */
@@ -185,7 +216,7 @@ export function renderMap(g, t, s, W, H, ctx = {}, work = {}) {
   if (s.projection === 'planar') splatPlanar(map, W, H, work.points, planarSigmaPx(s, W), s.truncate);
   else {
     if (!work.grid || work.grid.W !== W || work.grid.H !== H) work.grid = makeGrid(W, H);
-    splatSphere(map, work.grid, work.points, Math.max(0.05, s.sigmaDeg) * DEG, s.truncate);
+    splatSphere(map, work.grid, work.points, Math.max(0.05, s.sigmaDeg) * DEG, s.truncate, ctx.fast ? (work.lut ||= {}) : null);
   }
   work.plain = null;
   if (s.memoryWeight > 0) {
@@ -199,7 +230,7 @@ export function renderMap(g, t, s, W, H, ctx = {}, work = {}) {
     if (s.projection === 'planar') splatPlanar(small, mw, mh, work.memPoints, planarSigmaPx(s, mw), s.truncate);
     else {
       if (!work.memGrid || work.memGrid.W !== mw || work.memGrid.H !== mh) work.memGrid = makeGrid(mw, mh);
-      splatSphere(small, work.memGrid, work.memPoints, Math.max(0.05, s.sigmaDeg) * DEG, s.truncate);
+      splatSphere(small, work.memGrid, work.memPoints, Math.max(0.05, s.sigmaDeg) * DEG, s.truncate, ctx.fast ? (work.lut ||= {}) : null);
     }
     enlarge(small, mw, mh, mem, W, H, s.projection !== 'planar');
     let bm = 0, mm = 0;

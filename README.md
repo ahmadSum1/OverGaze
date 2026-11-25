@@ -183,6 +183,10 @@ The readout under the video shows the points in the window, the observers that c
 
 On Salient360, "pooled + memory" ranks held-out viewers' fixations better than pooling alone (area under the curve 0.846 against 0.807) but most of that comes from knowing the scene's salient objects at all; see [docs/validation.md](docs/validation.md), sections 5 and 6.
 
+### Playback speed
+
+While the video plays, the live map takes a faster path: the Gaussian is read from a table (within 0.00002 % of the map's maximum of the exact value) and pooled points moved along the motion are moved on from the previous frame (one short step) instead of from their own moment. If a frame still takes over 25 ms, the live map is drawn at half its width (at least 256) until the video is paused. Paused, scrubbing and stepping use the exact path at the full width, and exports always do, so exported maps are unchanged. On 16_Turtle (109 recordings, ±1 s Gaussian pooling, motion compensation, live width 512) a frame took about 130 ms before; now about 19 ms while playing (map 14 ms at 256 wide). The readout shows the time of the whole frame and of the map.
+
 ### Gaze points
 
 **Show gaze points** draws one dot per fixation (or raw gaze sample) in the pooling window. **Colour = person**: both eyes of a person share it; the left eye (or a recording without a pair) is a circle, the right eye a square of the same area. The 12 colours are bright, ordered so that neighbours in the list differ most (also for colour-blind viewers), and every dot has a dark edge so it shows on bright video too; with more than 12 people they repeat. Under it, **more**:
