@@ -117,3 +117,4 @@ input[type=range]{accent-color:var(--lime);width:100%}
 .eye-row>label span{min-width:0}
 #video-original{color:var(--lime);text-decoration:none}#video-original:hover{text-decoration:underline}
 .grid2 .grid-span{grid-column:1/-1}
+.select-all{margin:4px 0 2px;border:1px solid #2a2e37;border-radius:6px}.select-all span{flex:1;font-weight:600}

@@ -753,3 +753,26 @@ test('while playing, the live map takes the fast path; paused, it is drawn exact
     assert.deepEqual(b.logs, []);
   } finally { b.close(); server.close(); }
 });
+
+test('select all: one box ticks or unticks every observer, shows half ticked when some are off, and follows the list', opts, async () => {
+  const { server, url } = await serve(), b = await launch();
+  try {
+    await b.goto(url + '?sample');
+    await b.waitFor('!!overgaze.state.gaze', 20000);
+    const box = 'document.querySelector("#obs-all-check")', on = () => b.eval('Array.from(overgaze.state.observerEnabled).reduce((a, c) => a + c, 0)');
+    assert.equal(await b.eval(`${box}.checked`), true);
+    await b.eval(`(c => { c.checked = false; c.dispatchEvent(new Event('change')); return 1; })(${box})`);
+    assert.equal(await on(), 0);
+    assert.equal(await b.eval('document.querySelector("#obs-all-count").textContent'), '0 of 8 on');
+    await b.eval(`(c => { c.checked = true; c.dispatchEvent(new Event('change', { bubbles: true })); return 1; })(document.querySelector('[data-obs="2"]'))`);
+    assert.deepEqual(await b.eval(`[${box}.checked, ${box}.indeterminate]`), [false, true], 'half ticked with one observer on');
+    await b.eval(`(c => { c.checked = true; c.dispatchEvent(new Event('change')); return 1; })(${box})`);
+    assert.equal(await on(), 8);
+    // the both-eye sample: people rows follow too
+    await b.goto(url + '?sample=eyes');
+    await b.waitFor('!!overgaze.state.people', 20000);
+    await b.eval(`(c => { c.checked = false; c.dispatchEvent(new Event('change')); return 1; })(${box})`);
+    assert.equal(await b.eval('document.querySelectorAll("#observer-list [data-person-check]:checked").length'), 0);
+    assert.deepEqual(b.logs, []);
+  } finally { b.close(); server.close(); }
+});
